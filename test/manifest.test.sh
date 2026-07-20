@@ -19,6 +19,17 @@ assert_eq "$(get "$m" "['iree_version']")"         "3.11.0"   "iree_version"
 assert_eq "$(get "$m" "['iree_tag']")"             "v3.11.0"  "iree_tag"
 assert_eq "$(get "$m" "['iree_compile_version']")" "3.11.0"   "paired compiler version"
 
+# vm_bytecode_version (design lines 119, 214): the HAL/VM module ABI version
+# the shipped runtime expects, read from its own installed header -- must
+# look like a real MAJOR.MINOR pair, never absent or a placeholder.
+vbv="$(get "$m" "['vm_bytecode_version']")"
+if printf '%s' "$vbv" | grep -qE '^[0-9]+\.[0-9]+$'; then
+  echo "ok: vm_bytecode_version looks like MAJOR.MINOR ($vbv)"
+else
+  echo "FAIL: vm_bytecode_version '$vbv' is not a MAJOR.MINOR version" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+fi
+
 # runtime_commit must be a real 40-char sha, not a placeholder.
 c="$(get "$m" "['runtime_commit']")"
 if printf '%s' "$c" | grep -qE '^[0-9a-f]{40}$'; then echo "ok: runtime_commit is a full sha"

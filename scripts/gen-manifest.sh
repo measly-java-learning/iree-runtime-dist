@@ -39,6 +39,22 @@ if [ -z "$GLIBC_BUILD" ]; then
 fi
 [ -n "$GLIBC_BUILD" ] || GLIBC_BUILD="unknown"
 
+# The HAL/VM module ABI version the runtime expects (design lines 119, 214):
+# so a consumer can fail fast with a clear message instead of a cryptic VM
+# import signature mismatch when a .vmfb was produced by an incompatible
+# compiler. Read straight from the just-installed runtime header rather than
+# fabricated -- iree/vm/bytecode/verifier.c rejects a module whose bytecode
+# version doesn't match IREE_VM_BYTECODE_VERSION_{MAJOR,MINOR} from this same
+# header, so this is the actual value the shipped runtime enforces.
+_isa_header="$PREFIX/include/iree/vm/bytecode/utils/isa.h"
+VM_BYTECODE_VERSION_MAJOR="$(grep -oE '#define[[:space:]]+IREE_VM_BYTECODE_VERSION_MAJOR[[:space:]]+[0-9]+' "$_isa_header" 2>/dev/null | grep -oE '[0-9]+$' || true)"
+VM_BYTECODE_VERSION_MINOR="$(grep -oE '#define[[:space:]]+IREE_VM_BYTECODE_VERSION_MINOR[[:space:]]+[0-9]+' "$_isa_header" 2>/dev/null | grep -oE '[0-9]+$' || true)"
+if [ -z "$VM_BYTECODE_VERSION_MAJOR" ] || [ -z "$VM_BYTECODE_VERSION_MINOR" ]; then
+  echo "error: could not read IREE_VM_BYTECODE_VERSION_MAJOR/MINOR from $_isa_header -- has IREE's bytecode versioning scheme changed?" >&2
+  exit 1
+fi
+VM_BYTECODE_VERSION="${VM_BYTECODE_VERSION_MAJOR}.${VM_BYTECODE_VERSION_MINOR}"
+
 # build_config comes from the same function the build used.
 BUILD_CONFIG_JSON="$(
   effective_cmake_flags "$VARIANT" | python3 -c '
@@ -60,11 +76,13 @@ print(json.dumps(cfg, indent=4, sort_keys=True))
 # smuggle content into the JSON. Reading from sys.argv keeps each value an opaque
 # string as far as the Python parser is concerned.
 python3 - "$OUT_DIR/manifest.json" "$VARIANT" "$PLATFORM" "$IREE_VERSION" \
-  "$RUNTIME_COMMIT" "$COMPILER_VERSION" "$GLIBC_BUILD" "$BUILD_CONFIG_JSON" <<'EOF'
+  "$RUNTIME_COMMIT" "$COMPILER_VERSION" "$GLIBC_BUILD" "$BUILD_CONFIG_JSON" \
+  "$VM_BYTECODE_VERSION" <<'EOF'
 import json, sys
 
 (_, out_path, variant, platform, iree_version, runtime_commit,
- compiler_version, glibc_build, build_config_json) = sys.argv
+ compiler_version, glibc_build, build_config_json,
+ vm_bytecode_version) = sys.argv
 
 manifest = {
     "schema_version": 2,
@@ -74,6 +92,7 @@ manifest = {
     "iree_tag": "v" + iree_version,
     "runtime_commit": runtime_commit,
     "iree_compile_version": compiler_version,
+    "vm_bytecode_version": vm_bytecode_version,
     "glibc_build": glibc_build,
     "build_config": json.loads(build_config_json),
     "notes": {
@@ -96,6 +115,14 @@ manifest = {
             "versions. Do not read this as a guarantee of compatibility with "
             "any glibc older than the value recorded here."
         ),
+        "vm_bytecode_version": (
+            "IREE_VM_BYTECODE_VERSION_MAJOR.MINOR from the shipped runtime's "
+            "own iree/vm/bytecode/utils/isa.h -- the value the VM bytecode "
+            "verifier checks a loaded .vmfb against. A .vmfb compiled by a "
+            "mismatched compiler version fails to load with a VM import "
+            "signature mismatch; compare this field before loading one built "
+            "elsewhere."
+        ),
     },
 }
 
@@ -111,6 +138,7 @@ platform=$PLATFORM
 iree_version=$IREE_VERSION
 runtime_commit=$RUNTIME_COMMIT
 iree_compile_version=$COMPILER_VERSION
+vm_bytecode_version=$VM_BYTECODE_VERSION
 glibc_build=$GLIBC_BUILD
 cmake_flags=$(effective_cmake_flags "$VARIANT" | tr '\n' ' ')
 EOF

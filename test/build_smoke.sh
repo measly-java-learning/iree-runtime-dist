@@ -148,48 +148,83 @@ else
 fi
 
 # Broader check: no INTERFACE_LINK_LIBRARIES entry in the exported targets file
-# may reference a Foo::Bar-style imported target that isn't either (a) defined
-# by this same export set (add_library(Foo::Bar ... IMPORTED)) or (b) resolved
-# by a find_package(...) call this config file makes. This is a general version
-# of the Threads check above -- it would have caught the Threads gap without
-# needing to know "Threads" by name, and it will catch the next such gap if an
-# IREE version bump introduces one. Implemented as a Python-free, awk/grep pass:
-# collect every "Namespace::Name" token appearing in any INTERFACE_LINK_LIBRARIES
-# property, subtract the ones this export set itself defines via
-# "add_library(Namespace::Name ... IMPORTED)", and for whatever remains, require
-# the config file to name-check for it via find_package(<Namespace-ish-name>).
-# We only have one real-world case to generalize from (Threads::Threads is
-# resolved by find_package(Threads)), so the mapping from "Foo::Bar" to the
-# find_package name is approximated as the namespace segment before "::" --
-# good enough for CMake's own find modules (Threads, OpenSSL, ZLIB, ...), which
-# is the class of dependency this check exists to catch.
+# may reference an imported target -- Foo::Bar-style OR a bare name like
+# "libbacktrace_libbacktrace" -- that isn't either (a) defined by this same
+# export set (add_library(<tok> ... IMPORTED)) or (b) resolved by a
+# find_package(...) call this config file makes (namespaced tokens only) or
+# (c) a known-safe reference: a real system library allowlisted by name, an
+# unresolved generator-expression artifact (contains "$<"), or an
+# already-normalized bare linker flag (e.g. "-lm", from relocatability
+# repair's absolute-system-path normalization).
+#
+# This is a general version of the Threads check above -- it would have caught
+# the Threads gap without needing to know "Threads" by name, and it will catch
+# the next such gap if an IREE version bump introduces one. It would ALSO have
+# caught the worst gap this project found: a bare name
+# ("libbacktrace_libbacktrace") in iree_base_base's link interface with no
+# corresponding add_library(...IMPORTED) anywhere in the export set, which
+# resolves at a downstream consumer's link step to "-llibbacktrace_libbacktrace"
+# with no matching -L search path and fails there -- silently, since
+# find_package(IREERuntime) itself succeeds. An earlier version of this check
+# filtered tokens to only those containing "::", which is why it never caught
+# that gap: of 239 INTERFACE_LINK_LIBRARIES tokens in the real export set,
+# exactly two contain "::" (both Threads::Threads), so the filter skipped
+# every bare-name token including the one that mattered. Implemented as a
+# Python-free, awk/grep pass: collect every token appearing in any
+# INTERFACE_LINK_LIBRARIES property, subtract the ones this export set itself
+# defines via "add_library(<tok> ... IMPORTED)", and for whatever remains,
+# either require the config file to name-check for it via
+# find_package(<Namespace-ish-name>) (namespaced tokens; the mapping from
+# "Foo::Bar" to the find_package name is approximated as the namespace segment
+# before "::" -- good enough for CMake's own find modules (Threads, OpenSSL,
+# ZLIB, ...)) or require it to be on the system-library allowlist (bare
+# tokens).
+#
+# Two more artifact shapes turn up once the "::" filter is gone, both handled
+# above: some INTERFACE_LINK_LIBRARIES entries wrap a dependency in a
+# generator expression CMake writes with a literal backslash before the "$"
+# (observed: `\$<LINK_ONLY:rt>`), so the unwrap sed strips an optional leading
+# backslash too; and nested generator expressions like
+# `$<TARGET_PROPERTY:tgt,PROP>` only partially unwrap in one sed pass, leaving
+# either a literal "$<" (caught by the existing genex filter) or, one level
+# deeper, a bare "tgt,PROP" string with a comma in it that no real target or
+# library name ever contains -- skipped explicitly.
 targets_runtime="$prefix/lib/cmake/IREE/IREETargets-Runtime.cmake"
 if [ -e "$targets_runtime" ]; then
   dangling=""
   while IFS= read -r tok; do
     [ -n "$tok" ] || continue
     case "$tok" in
-      *::*) : ;;
-      *) continue ;;
+      *'$<'*) continue ;;   # unresolved (possibly nested) generator-expression artifact
+      *','*)  continue ;;   # $<TARGET_PROPERTY:tgt,PROP>-style artifact left after unwrap
+                             # (a real target/library name never contains a comma)
+      -l*)    continue ;;   # already-normalized bare linker flag
     esac
     if grep -qF "add_library($tok " "$targets_runtime"; then
       continue
     fi
-    ns="${tok%%::*}"
-    if [ -e "$runtime_config" ] && grep -qE "find_package\([[:space:]]*${ns}[[:space:]]" "$runtime_config"; then
-      continue
-    fi
+    case "$tok" in
+      *::*)
+        ns="${tok%%::*}"
+        if [ -e "$runtime_config" ] && grep -qE "find_package\([[:space:]]*${ns}[[:space:]]" "$runtime_config"; then
+          continue
+        fi
+        ;;
+      dl|rt|m|pthread)
+        continue
+        ;;
+    esac
     dangling="$dangling $tok"
   done < <(grep -oE 'INTERFACE_LINK_LIBRARIES[[:space:]]+"[^"]*"' "$targets_runtime" \
               | sed -E 's/^INTERFACE_LINK_LIBRARIES[[:space:]]+"(.*)"$/\1/' \
               | tr ';' '\n' \
-              | sed -E 's/\$<[A-Z_]+:(.*)>/\1/' \
+              | sed -E 's/\\?\$<[A-Z_]+:(.*)>/\1/' \
               | sort -u)
   if [ -n "$dangling" ]; then
-    echo "FAIL: INTERFACE_LINK_LIBRARIES references imported target(s) neither exported nor find_package'd by the config:$dangling" >&2
+    echo "FAIL: INTERFACE_LINK_LIBRARIES references imported target(s) neither exported, find_package'd, nor allowlisted:$dangling" >&2
     ASSERT_FAILS=$((ASSERT_FAILS+1))
   else
-    echo "ok: no dangling Foo::Bar imported-target references in IREETargets-Runtime.cmake"
+    echo "ok: no dangling imported-target references in IREETargets-Runtime.cmake"
   fi
 else
   echo "FAIL: $targets_runtime missing, cannot check for dangling imported targets" >&2

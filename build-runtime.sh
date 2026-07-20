@@ -8,6 +8,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/scripts/lib/variants.sh"
 . "$HERE/scripts/lib/cmakeflags.sh"
+. "$HERE/scripts/lib/naming.sh"
 
 VARIANT="default"
 PREFIX=""
@@ -63,7 +64,9 @@ if [ -z "$BUILD_DIR" ]; then
   BUILD_DIR="$(dirname "$PREFIX")/iree-build-${VARIANT}"
 fi
 
-PLATFORM="linux-x86_64"
+# PLATFORMS comes from scripts/lib/naming.sh (single source of truth). This
+# recipe currently only ever produces the first (only) supported platform.
+PLATFORM="$(known_platforms | head -n1)"
 IREE_VERSION="$(git -C "$IREE_SRC" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "unknown")"
 COMPILER_VERSION="${COMPILER_VERSION:-$IREE_VERSION}"
 
@@ -306,8 +309,8 @@ echo "==> phase 1 complete"
 echo "==> repairing relocatability"
 relocatability_repair "$PREFIX"
 
-echo "==> asserting relocatability"
-relocatability_assert "$PREFIX" "$(cd "$BUILD_DIR" && pwd)" "$(cd "$IREE_SRC" && pwd)"
+echo "==> asserting relocatability (mid-build; Phase 3/4 outputs don't exist yet)"
+relocatability_assert "$PREFIX" "$(cd "$BUILD_DIR" && pwd)" "$(cd "$IREE_SRC" && pwd)" "$HERE"
 
 echo "==> phase 2 complete"
 
@@ -352,5 +355,19 @@ echo "==> phase 3 complete"
 # --- Phase 4: pair with the compiler ----------------------------------------
 echo "==> compiling paired smoke artifact"
 bash "$HERE/scripts/gen-addvmfb.sh" "$PREFIX" "$COMPILER_VERSION"
+
+# --- Final relocatability proof ----------------------------------------------
+# The Phase 2 assertion above only covers what existed at that point in the
+# build. add.vmfb (Phase 4) and manifest.json/BUILDINFO/both constants
+# JSONs/IreeRuntimeDistConfig.cmake/IREERuntimeConfigVersion.cmake (Phase 3)
+# are all written AFTER it, and nothing re-checked them -- which is precisely
+# how a build-machine path (an absolute iree-compile input path baked into
+# add.vmfb) shipped in a published tarball despite the Phase 2 assertion
+# passing cleanly. Re-run the assertion here, now that every artifact the
+# tarball will contain has actually been written, so it covers the entire
+# staged prefix as the design's phase-2 contract requires -- not just the
+# two-phases-old snapshot of it.
+echo "==> asserting relocatability (final; covers the full staged prefix)"
+relocatability_assert "$PREFIX" "$(cd "$BUILD_DIR" && pwd)" "$(cd "$IREE_SRC" && pwd)" "$HERE"
 
 echo "==> build complete: $PREFIX"

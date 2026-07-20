@@ -28,6 +28,9 @@ COMPILER_VERSION="${2:?compiler-version required}"
 
 OUT_DIR="$PREFIX/share/iree-runtime-dist"
 mkdir -p "$OUT_DIR"
+# Resolve to an absolute path now, before we cd elsewhere below -- PREFIX may
+# have been passed as a relative path.
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 venv="$(mktemp -d)/venv"
 trap 'rm -rf "$(dirname "$venv")"' EXIT
@@ -35,10 +38,18 @@ trap 'rm -rf "$(dirname "$venv")"' EXIT
 python3 -m venv "$venv"
 "$venv/bin/pip" install --quiet "iree-base-compiler==${COMPILER_VERSION}"
 
-"$venv/bin/iree-compile" "$HERE/../emit/add.mlir" \
-  --iree-hal-target-device=local \
-  --iree-hal-local-target-device-backends=llvm-cpu \
-  --iree-llvmcpu-target-cpu=generic \
-  -o "$OUT_DIR/add.vmfb"
+# iree-compile embeds its INPUT path (as MLIR location info) into the compiled
+# module -- an absolute input path therefore leaks the build machine's
+# directory layout straight into add.vmfb. cd into emit/ and pass a bare
+# relative filename so nothing absolute ever reaches the compiler. The output
+# path (-o) is not embedded, so it can stay absolute.
+(
+  cd "$HERE/../emit"
+  "$venv/bin/iree-compile" "add.mlir" \
+    --iree-hal-target-device=local \
+    --iree-hal-local-target-device-backends=llvm-cpu \
+    --iree-llvmcpu-target-cpu=generic \
+    -o "$OUT_DIR/add.vmfb"
+)
 
 echo "==> compiled add.vmfb with iree-base-compiler==${COMPILER_VERSION}"

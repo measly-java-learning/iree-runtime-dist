@@ -26,14 +26,34 @@ jobs:
       iree_tag: ${{ steps.derive.outputs.iree_tag }}
       compiler_version: ${{ steps.derive.outputs.compiler_version }}
       submodules: ${{ steps.submodules.outputs.list }}
+      platforms: ${{ steps.platforms.outputs.list }}
     steps:
       - uses: actions/checkout@v4
       - id: derive
+        # Without an explicit shell:, Actions runs this as `bash -e {0}` --
+        # -e WITHOUT pipefail. A failure in derive-version.sh (e.g. a tag that
+        # matches the trigger glob v*.*.*-* but not the script's stricter
+        # pkgrev regex, like v3.11.0-rc1) would then be swallowed by the
+        # pipe: `tr` still exits 0, so the step "succeeds" with all three
+        # outputs empty, and the build job's checkout of iree-org/iree
+        # silently falls back to ref: "" (main) instead of the pinned stable
+        # tag -- exactly the stable-vs-main mix this project exists to
+        # foreclose. `shell: bash` makes Actions invoke
+        # `bash --noprofile --norc -eo pipefail {0}`, so the pipeline's exit
+        # status is the failure of any stage, not just the last.
+        shell: bash
         run: bash scripts/derive-version.sh "${GITHUB_REF_NAME}" | tr 'A-Z' 'a-z' >> "$GITHUB_OUTPUT"
       - id: submodules
         run: |
           . scripts/lib/submodules.sh
           echo "list=$(required_submodules)" >> "$GITHUB_OUTPUT"
+      - id: platforms
+        # Single source of truth for the platform list (scripts/lib/naming.sh)
+        # threaded into the build/verify job matrices below via fromJson(),
+        # rather than a third and fourth hard-coded "linux-x86_64" here.
+        run: |
+          . scripts/lib/naming.sh
+          echo "list=$(platforms_json)" >> "$GITHUB_OUTPUT"
       - run: bash test/run.sh
 
   build:
@@ -42,7 +62,7 @@ jobs:
     strategy:
       matrix:
         variant: [default]
-        platform: [linux-x86_64]
+        platform: ${{ fromJson(needs.setup.outputs.platforms) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -153,7 +173,7 @@ jobs:
     strategy:
       matrix:
         variant: [default]
-        platform: [linux-x86_64]
+        platform: ${{ fromJson(needs.setup.outputs.platforms) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
