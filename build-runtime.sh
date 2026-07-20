@@ -67,7 +67,28 @@ fi
 # PLATFORMS comes from scripts/lib/naming.sh (single source of truth). This
 # recipe currently only ever produces the first (only) supported platform.
 PLATFORM="$(known_platforms | head -n1)"
-IREE_VERSION="$(git -C "$IREE_SRC" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "unknown")"
+
+# The IREE source is a bind mount owned by the invoking user, while the container
+# runs as root, so git refuses it as "dubious ownership" and every `git -C
+# $IREE_SRC` below fails. Declaring it safe here -- via the environment rather
+# than `git config --global`, so no state outside this process is mutated --
+# covers this script and the scripts it invokes (gen-manifest.sh reads the same
+# repo). Without it the provenance git calls fail inside the container but not on
+# a bare host run, which is exactly the divergence CI trips over.
+_iree_src_abs="$(cd "$IREE_SRC" && pwd)"
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0="$_iree_src_abs"
+
+# No `|| echo unknown` fallback: a failure here is not a benign "version not
+# known", it silently stamps "unknown" into BUILDINFO and manifest.json as
+# recorded provenance. gen-manifest.sh already hard-requires this same repo be
+# readable (`git rev-parse HEAD`, no fallback), so tolerating failure here was
+# never coherent -- it just moved the error somewhere less obvious.
+IREE_VERSION="$(git -C "$IREE_SRC" describe --tags --abbrev=0 | sed 's/^v//')" || {
+  echo "error: could not read a tag from '$IREE_SRC' -- is it a git checkout at a tagged commit?" >&2
+  exit 1
+}
 COMPILER_VERSION="${COMPILER_VERSION:-$IREE_VERSION}"
 
 echo "build-runtime.sh: variant=$VARIANT prefix=$PREFIX build-dir=$BUILD_DIR"
