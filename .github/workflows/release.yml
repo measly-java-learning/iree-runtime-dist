@@ -75,12 +75,17 @@ jobs:
 
       # Rather than duplicate the pinned `dnf install` NEVRAs inline in this
       # workflow build an image placed in the GHA cache (no GHCR publish etc.)
+      #
+      # Paths are `dist/`-prefixed because this job checks the repo out to
+      # `path: dist` (to leave room for `iree/` alongside it). build-push-action
+      # resolves `context`/`file` against the workspace root, and `uses:` steps
+      # ignore `working-directory`, so a bare `docker` here is a nonexistent path.
       - uses: docker/setup-buildx-action@v4.2.0
       - name: Build the pinned manylinux_2_28 image
         uses: docker/build-push-action@v7.3.0
         with:
-          context: docker
-          file: docker/Dockerfile
+          context: dist/docker
+          file: dist/docker/Dockerfile
           tags: ${{ env.BUILD_IMAGE }}
           load: true
           cache-from: type=gha

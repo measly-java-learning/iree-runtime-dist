@@ -5,9 +5,9 @@ Guidance for Claude Code working in this repository.
 ## What this repo is
 
 CI infrastructure that builds the IREE **runtime** and publishes attested, hash-pinned tarballs.
-It produces *artifacts*, not a library — a build recipe plus packaging plus CI. No GitHub repo
-exists for this project yet; the pin generator has only been run against a placeholder org slug.
-Don't write or imply commands against a real release URL.
+It produces *artifacts*, not a library — a build recipe plus packaging plus CI. The repo lives at
+`measly-java-learning/iree-runtime-dist`. No release has published successfully yet, so no release
+URL resolves — don't write or imply commands against one until a run has actually produced assets.
 
 Design: `docs/superpowers/specs/2026-07-19-iree-runtime-dist-design.md`.
 
