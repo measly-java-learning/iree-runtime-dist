@@ -1,9 +1,9 @@
+out/
 out-*/
-et-build/
-spike/*.log
-et-build-*/
-etnp-extras-*/
-.superpowers/
+iree-build/
+iree-build-*/
 dist/
+spike/*.log
 __pycache__/
 *.pyc
+.superpowers/

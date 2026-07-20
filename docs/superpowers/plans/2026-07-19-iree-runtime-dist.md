@@ -15,7 +15,7 @@
 - **IREE source version:** stable tag `v3.11.0` (commit `e4a3b0405d7d23554da26403658d0e8c3c5ecf25`). Never `main`.
 - **Paired compiler:** pip `iree-base-compiler==3.11.0` (stable). Never built from source, never shipped.
 - **Compiler is out of contract:** always configure with `-DIREE_BUILD_COMPILER=OFF`.
-- **Build container:** `quay.io/pypa/manylinux_2_28_x86_64`. clang/lld 21.1.8 installed into it. CPython 3.12 (`/opt/python/cp312-cp312/bin`).
+- **Build container:** `quay.io/pypa/manylinux_2_28_x86_64:2026.06.04-1` (dated tag, never `latest`). clang/lld 21.1.8 installed into it. CPython 3.12 (`/opt/python/cp312-cp312/bin`). Task 9b built a thin local specialization, `iree-runtime-dist-build:manylinux_2_28` (see `docker/Dockerfile`, built via `scripts/build-image.sh`), with clang/lld/ninja preinstalled so local invocations stop paying a `dnf install` tax (~50s/run). Local docs use that image; CI still uses the base image with inline `dnf install` until Task 13 decides how (or whether) to make the prebuilt image available to a GitHub Actions runner — see that task's notes.
 - **v1 matrix:** variant `default`, platform `linux-x86_64`. One tarball.
 - **Static only:** `BUILD_SHARED_LIBS=OFF`, `CMAKE_BUILD_TYPE=Release`, PIC on.
 - **Recipe never clones IREE.** The caller always supplies `--iree-src`.
@@ -678,7 +678,7 @@ echo "==> phase 1 complete"
 
 ```bash
 docker run --rm -v "$PWD":/work -v /home/corey/workspace/iree:/iree \
-  -w /work quay.io/pypa/manylinux_2_28_x86_64 \
+  -w /work iree-runtime-dist-build:manylinux_2_28 \
   bash -lc 'export PATH=/opt/python/cp312-cp312/bin:$PATH; \
     ./build-runtime.sh --variant default --prefix /work/out --iree-src /iree'
 bash test/build_smoke.sh out
@@ -686,7 +686,13 @@ bash test/build_smoke.sh out
 
 Expected: `ok:` for every check, exit 0.
 
-If the container lacks clang 21.1.8, install it first (`dnf install -y clang lld` or a pinned tarball) and record what was needed — Task 13 bakes it into CI.
+(Historical note, Task 4: at the time this step was first run, the plain
+`quay.io/pypa/manylinux_2_28_x86_64` base lacked clang, so it was installed
+inline with `dnf install -y clang lld ninja-build patchelf` and the resolved
+versions were recorded — clang/lld 21.1.8, ninja-build 1.8.2. Task 9b baked
+that install into `docker/Dockerfile` as `iree-runtime-dist-build:manylinux_2_28`
+so local invocations, including this one, no longer pay that cost per run;
+build it once with `scripts/build-image.sh`.)
 
 - [ ] **Step 5: Commit**
 
@@ -874,7 +880,7 @@ The consumer hard-coded `FLOAT_32 = 0x00000120` when the real value is `0x210000
 
 **Interfaces:**
 - Consumes: a built prefix (Task 4).
-- Produces: `<prefix>/share/iree-runtime-dist/element_types.json` and `status_codes.json`. Both are flat JSON objects mapping name → integer.
+- Produces: `scripts/gen-constants.sh <prefix>` → `<prefix>/share/iree-runtime-dist/element_types.json` and `status_codes.json`. Both are flat JSON objects mapping name → integer.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -935,9 +941,6 @@ Expected: FAIL — both JSON files missing.
 
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
-
-#define EMIT(name, value) \
-  printf("%s\n  \"%s\": %llu", first ? "" : ",", name, (unsigned long long)(value)), first = 0
 
 static int emit_element_types(const char* path) {
   FILE* f = fopen(path, "w");
@@ -1008,8 +1011,7 @@ If a listed enumerator does not exist at IREE `v3.11.0`, the compile fails namin
 # Compile and run the constant emitter against a built prefix.
 set -euo pipefail
 
-PREFIX="${1:?usage: gen-constants.sh <prefix> <build-dir>}"
-BUILD_DIR="${2:?usage: gen-constants.sh <prefix> <build-dir>}"
+PREFIX="${1:?usage: gen-constants.sh <prefix>}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 OUT_DIR="$PREFIX/share/iree-runtime-dist"
@@ -1047,7 +1049,7 @@ Append to `build-runtime.sh`:
 ```bash
 # --- Phase 3: generated metadata --------------------------------------------
 echo "==> generating constants"
-bash "$HERE/scripts/gen-constants.sh" "$PREFIX" "$BUILD_DIR"
+bash "$HERE/scripts/gen-constants.sh" "$PREFIX"
 ```
 
 Run the Docker build, then: `bash test/constants.test.sh out`
@@ -1246,8 +1248,18 @@ The wishlist assumed LLVM notices were needed. With `IREE_BUILD_COMPILER=OFF`, L
 - Test: `test/notices.test.sh`
 
 **Interfaces:**
-- Consumes: a built prefix (Task 4), `IREE_REQUIRED_SUBMODULES` (Task 1).
-- Produces: `<prefix>/LICENSE` and `<prefix>/THIRD-PARTY-NOTICES/<component>/LICENSE`.
+- Consumes: a built prefix (Task 4).
+- Produces: `<prefix>/LICENSE` and `<prefix>/THIRD-PARTY-NOTICES/<component>/LICENSE`. Also `scripts/lib/linked-components.sh` defining `IREE_LINKED_COMPONENTS`.
+
+**IMPORTANT — do not use `IREE_REQUIRED_SUBMODULES` as the notices input.** Task 1
+established empirically that it is a *checkout gate*: IREE's
+`check_submodule_init.py --runtime_only` demands all 11 paths in
+`runtime_submodules.txt` be initialized regardless of what the build actually uses.
+Most of them (`tracy`, `spirv_cross`, `vulkan_headers`, `webgpu-headers`,
+`hip-build-deps`, `hsa-runtime-headers`, `benchmark`, `googletest`) are **not linked**
+into a local-sync/local-task CPU runtime. Generating a notice for each would over-claim
+what the artifact contains — the exact error the design forbids for LLVM. Notices must
+be derived from what is actually linked, which is a separate, smaller list.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1272,11 +1284,16 @@ else echo "FAIL: THIRD-PARTY-NOTICES missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+
 if [ -s "$prefix/THIRD-PARTY-NOTICES/flatcc/LICENSE" ]; then echo "ok: flatcc notice shipped"
 else echo "FAIL: flatcc notice missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 
-# LLVM is never linked (IREE_BUILD_COMPILER=OFF); shipping its notice over-claims.
-if [ -e "$prefix/THIRD-PARTY-NOTICES/llvm-project" ]; then
-  echo "FAIL: llvm-project notice must not ship -- LLVM is not linked" >&2
-  ASSERT_FAILS=$((ASSERT_FAILS+1))
-else echo "ok: no LLVM notice (correctly not claimed)"; fi
+# Nothing unlinked may be claimed. llvm-project is excluded by IREE_BUILD_COMPILER=OFF.
+# The rest are submodules IREE's checkout gate demands but that a local-sync/local-task
+# CPU runtime never links -- claiming them would misrepresent the artifact's contents.
+for unlinked in llvm-project tracy spirv_cross vulkan_headers webgpu-headers \
+                hip-build-deps hsa-runtime-headers benchmark googletest; do
+  if [ -e "$prefix/THIRD-PARTY-NOTICES/$unlinked" ]; then
+    echo "FAIL: $unlinked notice must not ship -- it is not linked into this artifact" >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+  else echo "ok: no $unlinked notice (correctly not claimed)"; fi
+done
 
 # Every notice directory must correspond to something actually shipped.
 for d in "$prefix"/THIRD-PARTY-NOTICES/*/; do
@@ -1293,7 +1310,62 @@ exit "$ASSERT_FAILS"
 Run: `bash test/notices.test.sh out`
 Expected: FAIL — LICENSE and THIRD-PARTY-NOTICES missing.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Determine what is actually linked (the experiment)**
+
+Do not assume. Inspect the built archives and find which third-party components
+contributed object files:
+
+```bash
+for a in out/lib/*.a; do
+  echo "== $(basename "$a")"
+  ar t "$a" 2>/dev/null | head -5
+done | head -60
+```
+
+Then check specifically for each candidate. flatcc is the known one:
+
+```bash
+nm -o out/lib/*.a 2>/dev/null | grep -c "flatcc" || true
+nm -o out/lib/*.a 2>/dev/null | grep -ciE "tracy|spirv|vulkan|webgpu|hsa_|benchmark|gtest" || true
+```
+
+Also check for components vendored in-tree rather than as submodules — IREE bundles
+some sources directly (e.g. `cpuinfo`, `libbacktrace`) that are linked and therefore
+DO need notices even though they are not submodules:
+
+```bash
+ls out/lib/*.a | sed 's|.*/lib||; s|\.a$||'
+grep -rn "third_party" out/lib/cmake/IREE/IREETargets-Runtime.cmake | head
+```
+
+Record the components with a nonzero linked footprint. That list — not the submodule
+list — is what Step 4 hard-codes. A component vendored in-tree still needs its license
+located under `$IREE_SRC/third_party/<name>/` or wherever IREE keeps it.
+
+- [ ] **Step 4: Write the linked-components list**
+
+`scripts/lib/linked-components.sh` — substitute the list you determined in Step 3:
+
+```bash
+#!/usr/bin/env bash
+# Third-party components ACTUALLY LINKED into the shipped artifact. Source me.
+#
+# Deliberately NOT IREE_REQUIRED_SUBMODULES. That list is a checkout gate: IREE's
+# check_submodule_init.py --runtime_only demands all 11 paths in
+# runtime_submodules.txt be initialized regardless of what the build uses. Most are
+# never linked into a local-sync/local-task CPU runtime, and shipping a license
+# notice for an unlinked component misrepresents what the artifact contains --
+# the same error as claiming LLVM, which IREE_BUILD_COMPILER=OFF excludes entirely.
+#
+# Determined empirically by inspecting the built archives (see Task 8 Step 3).
+# When the driver/loader set changes, re-run that inspection -- this list is not
+# derivable from the build flags alone.
+IREE_LINKED_COMPONENTS="flatcc"
+
+linked_components() { printf '%s' "$IREE_LINKED_COMPONENTS"; }
+```
+
+- [ ] **Step 5: Write the implementation**
 
 `scripts/gen-notices.sh`:
 
@@ -1307,7 +1379,7 @@ Expected: FAIL — LICENSE and THIRD-PARTY-NOTICES missing.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-. "$HERE/lib/submodules.sh"
+. "$HERE/lib/linked-components.sh"
 
 PREFIX="${1:?usage: gen-notices.sh <prefix> <iree-src>}"
 IREE_SRC="${2:?iree-src required}"
@@ -1319,10 +1391,10 @@ NOTICES="$PREFIX/THIRD-PARTY-NOTICES"
 rm -rf "$NOTICES"
 mkdir -p "$NOTICES"
 
-# One notice per submodule the runtime build actually required. Because that set
-# is the empirically-determined build input, this cannot silently over- or
-# under-claim: adding a submodule to the build adds its notice here.
-for sm in $IREE_REQUIRED_SUBMODULES; do
+# One notice per component actually LINKED into the artifact -- deliberately not
+# IREE_REQUIRED_SUBMODULES, which is a checkout gate demanding paths this build
+# never links (see scripts/lib/linked-components.sh).
+for sm in $IREE_LINKED_COMPONENTS; do
   name="$(basename "$sm")"
   found=""
   for cand in LICENSE LICENSE.txt LICENSE.md COPYING NOTICE; do
@@ -1341,7 +1413,7 @@ done
 echo "==> collected $(find "$NOTICES" -name LICENSE | wc -l) third-party notice(s)"
 ```
 
-- [ ] **Step 4: Wire into the build**
+- [ ] **Step 6: Wire into the build**
 
 Append to Phase 3 in `build-runtime.sh`:
 
@@ -1350,15 +1422,16 @@ echo "==> collecting license notices"
 bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC"
 ```
 
-- [ ] **Step 5: Verify**
+- [ ] **Step 7: Verify**
 
 Run the Docker build, then: `bash test/notices.test.sh out`
-Expected: `ok: flatcc notice shipped`, `ok: no LLVM notice (correctly not claimed)`, exit 0.
+Expected: `ok: flatcc notice shipped` plus an `ok: no <name> notice` line for every
+unlinked component, exit 0.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add scripts/gen-notices.sh test/notices.test.sh build-runtime.sh
+git add scripts/lib/linked-components.sh scripts/gen-notices.sh test/notices.test.sh build-runtime.sh
 git commit -m "feat: third-party notices scoped to the actual link surface"
 ```
 
@@ -1807,7 +1880,7 @@ vmfb="$PREFIX/share/iree-runtime-dist/add.vmfb"
 # Both drivers ship in one tarball and the consumer picks at runtime, so both
 # must work. The local-task pass is where a TSan leg lands later.
 fails=0
-for uri in "local-sync://" "local-task://"; do
+for uri in "local-sync" "local-task"; do
   echo "==> running with $uri"
   if "$build/consumer" "$vmfb" "$uri"; then
     echo "ok: $uri"
@@ -1830,7 +1903,7 @@ The clean container is the point — do not run this on the build host.
 
 ```bash
 docker run --rm -v "$PWD":/work:ro -v "$PWD/out":/prefix:ro \
-  -w /tmp quay.io/pypa/manylinux_2_28_x86_64 \
+  -w /tmp iree-runtime-dist-build:manylinux_2_28 \
   bash -lc 'export PATH=/opt/python/cp312-cp312/bin:$PATH; \
     cp -r /work/test /tmp/test && cp -r /prefix /tmp/prefix && \
     bash /tmp/test/consumer/run.sh /tmp/prefix'
@@ -1838,10 +1911,10 @@ docker run --rm -v "$PWD":/work:ro -v "$PWD/out":/prefix:ro \
 
 Expected:
 ```
-ok: add.vmfb ran on local-sync:// and produced the expected result
-ok: local-sync://
-ok: add.vmfb ran on local-task:// and produced the expected result
-ok: local-task://
+ok: add.vmfb ran on local-sync and produced the expected result
+ok: local-sync
+ok: add.vmfb ran on local-task and produced the expected result
+ok: local-task
 CONSUMER E2E PASSED
 ```
 
@@ -2108,16 +2181,39 @@ jobs:
         run: git submodule update --init --depth 1 ${{ needs.setup.outputs.submodules }}
 
       - name: Build in manylinux
+        # NOTE (Task 9b): a GitHub Actions runner cannot see the
+        # locally-built `iree-runtime-dist-build:manylinux_2_28` image from
+        # docker/Dockerfile -- it only exists on whatever machine ran
+        # scripts/build-image.sh. This step therefore still uses the bare,
+        # dated base image with an inline `dnf install`, same as before
+        # Task 9b. Task 13 (not yet implemented) is where the CI story for
+        # the prebuilt image gets decided -- e.g. `docker build` from
+        # docker/Dockerfile with GitHub Actions' layer cache, or publishing
+        # the image to GHCR from a separate workflow and pulling it here.
+        # Do not assume either exists yet; this job as written is honest
+        # about paying the dnf tax in CI for now. patchelf is intentionally
+        # NOT installed -- see docker/Dockerfile's comment: the base image's
+        # preinstalled /usr/local/bin/patchelf (0.17.2) already shadows it.
+        # Package NEVRAs are pinned to match docker/Dockerfile, for the same
+        # reproducibility reason -- but note the tradeoff: if the AlmaLinux/
+        # EPEL mirrors ever retire these exact builds, this step starts
+        # failing loudly (dnf can't resolve the NEVRA) rather than silently
+        # drifting to a newer default. That's an acceptable failure mode for
+        # CI (visible, not silent) but means these three lines need updating
+        # in lockstep with docker/Dockerfile's RUN line if the pin is bumped.
         run: |
           docker run --rm \
             -v "${PWD}/dist":/work -v "${PWD}/iree":/iree \
             -e COMPILER_VERSION="${{ needs.setup.outputs.compiler_version }}" \
             -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-            -w /work quay.io/pypa/manylinux_2_28_x86_64 \
+            -w /work quay.io/pypa/manylinux_2_28_x86_64:2026.06.04-1 \
             bash -lc '
               set -euo pipefail
               export PATH=/opt/python/cp312-cp312/bin:$PATH
-              dnf install -y clang lld ninja-build patchelf >/dev/null
+              dnf install -y \
+                clang-21.1.8-1.module_el8.10.0+4172+b6b13d75 \
+                lld-21.1.8-1.module_el8.10.0+4172+b6b13d75 \
+                ninja-build-1.8.2-1.el8 >/dev/null
               ./build-runtime.sh --variant ${{ matrix.variant }} \
                 --prefix /work/out --iree-src /iree
               chown -R "$HOST_UID:$HOST_GID" /work/out
@@ -2173,13 +2269,20 @@ jobs:
           mkdir -p extracted
           tar -xzf assets/*.tar.gz -C extracted
           prefix="$(find extracted -maxdepth 1 -mindepth 1 -type d)"
+          # Same Task 9b caveat as the build job above: the runner cannot see
+          # a locally-built image, so this still uses the dated base image
+          # with an inline, NEVRA-pinned dnf install rather than
+          # iree-runtime-dist-build:manylinux_2_28.
           docker run --rm \
             -v "${PWD}/test":/test:ro -v "${PWD}/${prefix}":/prefix:ro \
-            -w /tmp quay.io/pypa/manylinux_2_28_x86_64 \
+            -w /tmp quay.io/pypa/manylinux_2_28_x86_64:2026.06.04-1 \
             bash -lc '
               set -euo pipefail
               export PATH=/opt/python/cp312-cp312/bin:$PATH
-              dnf install -y clang lld ninja-build >/dev/null
+              dnf install -y \
+                clang-21.1.8-1.module_el8.10.0+4172+b6b13d75 \
+                lld-21.1.8-1.module_el8.10.0+4172+b6b13d75 \
+                ninja-build-1.8.2-1.el8 >/dev/null
               cp -r /test /tmp/t && cp -r /prefix /tmp/p
               bash /tmp/t/consumer/run.sh /tmp/p
             '
@@ -2342,8 +2445,8 @@ Both CPU drivers ship in one tarball; you select at runtime by device URI:
 
 | URI | Behavior |
 |---|---|
-| `local-sync://` | Inline, single-threaded. No IREE-internal threads. |
-| `local-task://` | Worker pool for CPU intra-op parallelism. |
+| `local-sync` | Inline, single-threaded. No IREE-internal threads. |
+| `local-task` | Worker pool for CPU intra-op parallelism. |
 
 ## Cutting a release
 
@@ -2363,10 +2466,13 @@ git clone --filter=blob:none --depth 1 --branch v3.11.0 \
   https://github.com/iree-org/iree.git /path/to/iree
 git -C /path/to/iree submodule update --init --depth 1 third_party/flatcc
 
+bash scripts/build-image.sh   # once; builds iree-runtime-dist-build:manylinux_2_28
+                               # and prints the resolved clang/lld/ninja/patchelf versions
+
 docker run --rm -v "$PWD":/work -v /path/to/iree:/iree \
-  -w /work quay.io/pypa/manylinux_2_28_x86_64 \
+  -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+  -w /work iree-runtime-dist-build:manylinux_2_28 \
   bash -lc 'export PATH=/opt/python/cp312-cp312/bin:$PATH; \
-    dnf install -y clang lld ninja-build patchelf; \
     ./build-runtime.sh --variant default --prefix /work/out --iree-src /iree'
 ```
 
@@ -2468,7 +2574,7 @@ git commit -m "docs: README and CLAUDE.md"
 Each is a milestone with its own spec/plan cycle:
 
 - **`devtools` variant** — Tracy tracing + allocation statistics. Adds `third_party/tracy` to the submodule set and a second matrix cell.
-- **TSan leg** — meaningful now only against `local-task://`, since threading became a runtime selection.
+- **TSan leg** — meaningful now only against `local-task`, since threading became a runtime selection.
 - **`windows-x86_64`** — MSVC, CRT `/MD` vs `/MT` matrix.
 - **GPU axis** — CUDA/Vulkan/HIP drivers. Not a flag flip: needs GPU-target compilation, matching loaders, and breaks the consumer's CPU-coherent-memory assumption.
 - **Tracking IREE `main`** — keys releases on a nightly compiler version and resolves it to a runtime commit.
