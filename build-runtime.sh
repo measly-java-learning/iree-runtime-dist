@@ -195,3 +195,14 @@ rm -f "$PREFIX/lib/cmake/IREE/IREETargets-Compiler.cmake"
 rm -f "$PREFIX/lib/cmake/IREE/IREETargets-Compiler-release.cmake"
 
 echo "==> phase 1 complete"
+
+# --- Phase 2: relocatability repair, then proof ------------------------------
+. "$HERE/scripts/relocatability.sh"
+
+echo "==> repairing relocatability"
+relocatability_repair "$PREFIX"
+
+echo "==> asserting relocatability"
+relocatability_assert "$PREFIX" "$(cd "$BUILD_DIR" && pwd)" "$(cd "$IREE_SRC" && pwd)"
+
+echo "==> phase 2 complete"
