@@ -1,0 +1,33 @@
+# iree-runtime-dist additions.
+#
+# Upstream's IREERuntimeConfig.cmake and IREETargets-Runtime.cmake ship unmodified
+# so the link surface tracks upstream. This file adds only what upstream omits:
+# one curated umbrella target and the manifest as CMake variables.
+
+get_filename_component(_IRD_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+
+find_package(IREERuntime REQUIRED
+  PATHS "${_IRD_PREFIX}/lib/cmake/IREE" NO_DEFAULT_PATH)
+
+set(IREE_RUNTIME_DIST_VERSION          "@IREE_VERSION@")
+set(IREE_RUNTIME_DIST_COMPILER_VERSION "@COMPILER_VERSION@")
+set(IREE_RUNTIME_DIST_VARIANT          "@VARIANT@")
+set(IREE_RUNTIME_DIST_PLATFORM         "@PLATFORM@")
+set(IREE_RUNTIME_DIST_RUNTIME_COMMIT   "@RUNTIME_COMMIT@")
+set(IREE_RUNTIME_DIST_PREFIX           "${_IRD_PREFIX}")
+set(IREE_RUNTIME_DIST_ADD_VMFB         "${_IRD_PREFIX}/share/iree-runtime-dist/add.vmfb")
+set(IREE_RUNTIME_DIST_MANIFEST         "${_IRD_PREFIX}/share/iree-runtime-dist/manifest.json")
+set(IREE_RUNTIME_DIST_ELEMENT_TYPES    "${_IRD_PREFIX}/share/iree-runtime-dist/element_types.json")
+set(IREE_RUNTIME_DIST_STATUS_CODES     "${_IRD_PREFIX}/share/iree-runtime-dist/status_codes.json")
+
+# One target to link. Upstream's export set carries the transitive archives,
+# compile definitions (including IREE_ALLOCATOR_SYSTEM_CTL), include dirs, and
+# link ordering -- this is a rename, not a re-derivation.
+if(NOT TARGET iree-runtime-dist::runtime)
+  add_library(iree-runtime-dist::runtime INTERFACE IMPORTED)
+  target_link_libraries(iree-runtime-dist::runtime INTERFACE iree_runtime_unified)
+endif()
+
+message(STATUS
+  "iree-runtime-dist ${IREE_RUNTIME_DIST_VERSION} (${IREE_RUNTIME_DIST_VARIANT}/${IREE_RUNTIME_DIST_PLATFORM}), "
+  "pair with iree-base-compiler==${IREE_RUNTIME_DIST_COMPILER_VERSION}")

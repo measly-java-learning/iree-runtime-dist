@@ -322,6 +322,31 @@ bash "$HERE/scripts/gen-manifest.sh" "$PREFIX" "$VARIANT" "$PLATFORM" \
 echo "==> collecting license notices"
 bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC" "$BUILD_DIR"
 
+echo "==> installing dist cmake additions"
+RUNTIME_COMMIT="$(git -C "$IREE_SRC" rev-parse HEAD)"
+mkdir -p "$PREFIX/lib/cmake/IreeRuntimeDist"
+sed -e "s|@IREE_VERSION@|${IREE_VERSION}|g" \
+    -e "s|@COMPILER_VERSION@|${COMPILER_VERSION}|g" \
+    -e "s|@VARIANT@|${VARIANT}|g" \
+    -e "s|@PLATFORM@|${PLATFORM}|g" \
+    -e "s|@RUNTIME_COMMIT@|${RUNTIME_COMMIT}|g" \
+    "$HERE/cmake/IreeRuntimeDist.cmake.in" \
+    > "$PREFIX/lib/cmake/IreeRuntimeDist/IreeRuntimeDistConfig.cmake"
+
+# Upstream has no write_basic_package_version_file, so find_package(IREERuntime 3.11)
+# with a version argument fails today. Supply the file it omits.
+cat > "$PREFIX/lib/cmake/IREE/IREERuntimeConfigVersion.cmake" <<EOF
+set(PACKAGE_VERSION "${IREE_VERSION}")
+if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+else()
+  set(PACKAGE_VERSION_COMPATIBLE TRUE)
+  if(PACKAGE_FIND_VERSION STREQUAL PACKAGE_VERSION)
+    set(PACKAGE_VERSION_EXACT TRUE)
+  endif()
+endif()
+EOF
+
 echo "==> phase 3 complete"
 
 # --- Phase 4: pair with the compiler ----------------------------------------
