@@ -19,6 +19,26 @@ relocatability_repair() { # <prefix>
     # where these live somewhere else. Normalize to bare -l<name>.
     find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
       | xargs -0 -r sed -i -E 's#/usr/lib(64)?/lib([a-zA-Z0-9_+-]+)\.(so|a)#-l\2#g'
+
+    # flatcc schema (*_c_fbs) targets bake their generator's include path in
+    # as raw "-I/abs/path" tokens inside INTERFACE_COMPILE_OPTIONS, e.g.
+    # "-I/iree/third_party/flatcc/include/". That is the build container's
+    # source mount, which does not exist on a consumer's machine -- and
+    # unlike INTERFACE_INCLUDE_DIRECTORIES, CMake never treats a raw compile
+    # option as a path to relocate, so the ${PACKAGE_PREFIX_DIR} rewrite above
+    # never touches it. Empirically, the public runtime API surface (transitively
+    # #including iree/runtime/api.h) never reaches a flatcc header, and these
+    # *_c_fbs targets are not reachable from iree_runtime_unified's
+    # INTERFACE_LINK_LIBRARIES closure -- so the flags are dead weight rather
+    # than a real compile requirement. Strip any absolute -I flag out of
+    # exported INTERFACE_COMPILE_OPTIONS; if that empties the property value,
+    # drop the whole property line (harmless no-op set_target_properties
+    # argument otherwise, but this keeps output tidy and the repair
+    # idempotent -- a second pass finds nothing left to strip).
+    find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
+      | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS/s#-I/[^;"]*;?##g'
+    find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
+      | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS[[:space:]]*""[[:space:]]*$/d'
   fi
 
   # Build-tree metadata must never ship.

@@ -79,4 +79,58 @@ assert_not_flagged "relative __FILE__"   'static const char f[] = "iree/vm/conte
 assert_not_flagged "nested src path"     'runtime/src/iree/async/foo.c'
 assert_not_flagged "upstream URL"        '// see https://github.com/iree-org/iree/blob/main/x.md'
 
+# --- flatcc schema target -I leak (Task 5b) ---------------------------------
+# flatcc's *_c_fbs schema targets embedded the build container's source mount
+# as raw "-I/abs/path" tokens in INTERFACE_COMPILE_OPTIONS, which the
+# ${PACKAGE_PREFIX_DIR} rewrite above never touches (it only rewrites the
+# staged prefix path, and it operates on paths, not compiler-flag strings).
+# Fresh single-file prefix, per case, so this can't be confounded by any
+# other case's content living in the same tree.
+flatcc_tmp="$(mktemp -d)"
+mkdir -p "$flatcc_tmp/lib/cmake/IREE"
+cat > "$flatcc_tmp/lib/cmake/IREE/IREETargets-Runtime.cmake" <<'EOF'
+# Create imported target iree_schemas_webgpu_executable_def_c_fbs
+add_library(iree_schemas_webgpu_executable_def_c_fbs INTERFACE IMPORTED)
+
+set_target_properties(iree_schemas_webgpu_executable_def_c_fbs PROPERTIES
+  INTERFACE_COMPILE_OPTIONS "-I/iree/third_party/flatcc/include/;-I/iree/third_party/flatcc/include/flatcc/reflection/"
+  INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
+  INTERFACE_LINK_LIBRARIES "-lm"
+  iree_ALIAS_TO "iree::schemas::webgpu_executable_def_c_fbs"
+)
+EOF
+
+relocatability_repair "$flatcc_tmp"
+got_flatcc="$(cat "$flatcc_tmp/lib/cmake/IREE/IREETargets-Runtime.cmake")"
+
+case "$got_flatcc" in
+  *"/iree/third_party/flatcc"*)
+    echo "FAIL: leaked flatcc -I path should be stripped" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)) ;;
+  *) echo "ok: leaked flatcc -I path stripped" ;;
+esac
+# Option B (strip, not relocate): the flags were dead weight, not a real
+# compile requirement, so no ${PACKAGE_PREFIX_DIR}-relative replacement is
+# expected here -- unlike the absolute-install-prefix case above.
+case "$got_flatcc" in
+  *'INTERFACE_COMPILE_OPTIONS'*)
+    echo "FAIL: emptied INTERFACE_COMPILE_OPTIONS line should be dropped" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)) ;;
+  *) echo "ok: emptied INTERFACE_COMPILE_OPTIONS line dropped" ;;
+esac
+assert_contains "$got_flatcc" '-lm' "sibling INTERFACE_LINK_LIBRARIES property untouched"
+assert_contains "$got_flatcc" 'iree_schemas_webgpu_executable_def_c_fbs' "target definition untouched"
+
+if relocatability_assert "$flatcc_tmp" "/work/iree-build-default" "/iree" >/dev/null 2>&1; then
+  echo "ok: flatcc-leak prefix passes assertion after repair"
+else echo "FAIL: flatcc-leak prefix should pass assertion after repair" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+
+# Idempotency: a second repair pass must not error and must not change output.
+before_flatcc="$got_flatcc"
+relocatability_repair "$flatcc_tmp"
+after_flatcc="$(cat "$flatcc_tmp/lib/cmake/IREE/IREETargets-Runtime.cmake")"
+if [ "$before_flatcc" = "$after_flatcc" ]; then
+  echo "ok: flatcc repair is idempotent"
+else echo "FAIL: second repair pass changed output" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+
+rm -rf "$flatcc_tmp"
+
 exit "$ASSERT_FAILS"
