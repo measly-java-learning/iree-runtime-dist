@@ -5,6 +5,13 @@ set -euo pipefail
 PREFIX="${1:?usage: gen-constants.sh <prefix>}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
+# CMake's find_package does not resolve a relative CMAKE_PREFIX_PATH reliably, and
+# the failure is a cryptic "package not found" rather than anything pointing at the
+# path. Normalize to absolute so a standalone `gen-constants.sh out` works the same
+# as build-runtime.sh's always-absolute $PREFIX.
+[ -d "$PREFIX" ] || { echo "error: prefix '$PREFIX' is not a directory" >&2; exit 2; }
+PREFIX="$(cd "$PREFIX" && pwd)"
+
 OUT_DIR="$PREFIX/share/iree-runtime-dist"
 mkdir -p "$OUT_DIR"
 

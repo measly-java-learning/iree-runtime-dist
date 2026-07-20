@@ -3,7 +3,6 @@
 // hard-coded FLOAT_32 as 0x00000120 when it is 0x21000020, and the error stayed
 // invisible until an output type was mapped back.
 #include <stdio.h>
-#include <string.h>
 
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
