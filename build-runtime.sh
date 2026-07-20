@@ -28,12 +28,16 @@ usage: build-runtime.sh --variant <default> --prefix <dir> --iree-src <checkout>
 EOF
 }
 
+require_value() { # <flag>
+  [ $# -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 2; }
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --variant)     VARIANT="$2"; shift 2 ;;
-    --prefix)      PREFIX="$2"; shift 2 ;;
-    --iree-src)    IREE_SRC="$2"; shift 2 ;;
-    --build-dir)   BUILD_DIR="$2"; shift 2 ;;
+    --variant)     require_value "$@"; VARIANT="$2"; shift 2 ;;
+    --prefix)      require_value "$@"; PREFIX="$2"; shift 2 ;;
+    --iree-src)    require_value "$@"; IREE_SRC="$2"; shift 2 ;;
+    --build-dir)   require_value "$@"; BUILD_DIR="$2"; shift 2 ;;
     --print-flags) PRINT_FLAGS=1; shift ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
