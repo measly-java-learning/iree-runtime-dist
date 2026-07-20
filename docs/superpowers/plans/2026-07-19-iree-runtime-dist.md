@@ -874,7 +874,7 @@ The consumer hard-coded `FLOAT_32 = 0x00000120` when the real value is `0x210000
 
 **Interfaces:**
 - Consumes: a built prefix (Task 4).
-- Produces: `<prefix>/share/iree-runtime-dist/element_types.json` and `status_codes.json`. Both are flat JSON objects mapping name → integer.
+- Produces: `scripts/gen-constants.sh <prefix>` → `<prefix>/share/iree-runtime-dist/element_types.json` and `status_codes.json`. Both are flat JSON objects mapping name → integer.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -935,9 +935,6 @@ Expected: FAIL — both JSON files missing.
 
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
-
-#define EMIT(name, value) \
-  printf("%s\n  \"%s\": %llu", first ? "" : ",", name, (unsigned long long)(value)), first = 0
 
 static int emit_element_types(const char* path) {
   FILE* f = fopen(path, "w");
@@ -1008,8 +1005,7 @@ If a listed enumerator does not exist at IREE `v3.11.0`, the compile fails namin
 # Compile and run the constant emitter against a built prefix.
 set -euo pipefail
 
-PREFIX="${1:?usage: gen-constants.sh <prefix> <build-dir>}"
-BUILD_DIR="${2:?usage: gen-constants.sh <prefix> <build-dir>}"
+PREFIX="${1:?usage: gen-constants.sh <prefix>}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 OUT_DIR="$PREFIX/share/iree-runtime-dist"
@@ -1047,7 +1043,7 @@ Append to `build-runtime.sh`:
 ```bash
 # --- Phase 3: generated metadata --------------------------------------------
 echo "==> generating constants"
-bash "$HERE/scripts/gen-constants.sh" "$PREFIX" "$BUILD_DIR"
+bash "$HERE/scripts/gen-constants.sh" "$PREFIX"
 ```
 
 Run the Docker build, then: `bash test/constants.test.sh out`
