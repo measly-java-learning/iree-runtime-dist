@@ -1,0 +1,248 @@
+name: release
+
+# Pushing a version tag is the ONLY release trigger.
+on:
+  push:
+    tags:
+      - "v*.*.*-*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  # Single source of truth for the build container's image tag. Built fresh
+  # in every job that needs it (via docker/build-push-action + the GitHub
+  # Actions layer cache), never pulled from a registry -- see the container
+  # decision below.
+  BUILD_IMAGE: iree-runtime-dist-build:manylinux_2_28
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      iree_version: ${{ steps.derive.outputs.iree_version }}
+      iree_tag: ${{ steps.derive.outputs.iree_tag }}
+      compiler_version: ${{ steps.derive.outputs.compiler_version }}
+      submodules: ${{ steps.submodules.outputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: derive
+        run: bash scripts/derive-version.sh "${GITHUB_REF_NAME}" | tr 'A-Z' 'a-z' >> "$GITHUB_OUTPUT"
+      - id: submodules
+        run: |
+          . scripts/lib/submodules.sh
+          echo "list=$(required_submodules)" >> "$GITHUB_OUTPUT"
+      - run: bash test/run.sh
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [default]
+        platform: [linux-x86_64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dist
+
+      # NEVER use submodules: recursive -- third_party/llvm-project alone is 2.6 GB
+      # and is unnecessary with IREE_BUILD_COMPILER=OFF. The required set is the
+      # tested constant in scripts/lib/submodules.sh, threaded through as
+      # needs.setup.outputs.submodules.
+      - uses: actions/checkout@v4
+        with:
+          repository: iree-org/iree
+          ref: ${{ needs.setup.outputs.iree_tag }}
+          path: iree
+          submodules: false
+          fetch-depth: 1
+      - name: Init required submodules only
+        working-directory: iree
+        run: git submodule update --init --depth 1 ${{ needs.setup.outputs.submodules }}
+
+      # --- Container decision (Task 13) ------------------------------------
+      # A GitHub Actions runner cannot see the locally-built
+      # iree-runtime-dist-build:manylinux_2_28 image from docker/Dockerfile --
+      # it only exists on whatever machine ran scripts/build-image.sh. Rather
+      # than duplicate the pinned `dnf install` NEVRAs inline in this
+      # workflow (which would create a second place that must be kept in
+      # lockstep with docker/Dockerfile), this workflow BUILDS docker/Dockerfile
+      # here, using GitHub Actions' own layer cache (cache-from/cache-to:
+      # type=gha) so the dnf install only actually runs on a cache miss. This
+      # is option (a) from the task brief: it is the honest choice because
+      # docker/Dockerfile stays the single source of truth for the toolchain
+      # NEVRAs and the glibc 2.28 base pin that manifest.json attests to --
+      # there is no second copy of those pins to drift. It is not option (b)
+      # (bare inline dnf install) because that would duplicate the pins, and
+      # it is deliberately NOT a GHCR publish pipeline -- no registry push,
+      # no cross-workflow dependency, just a local `docker build` per job
+      # backed by the GHA cache.
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the pinned manylinux_2_28 image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile
+          tags: ${{ env.BUILD_IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build in manylinux
+        # Ownership decision (Task 13): the checkout above is owned by the
+        # runner user, but the container below runs as root by default (the
+        # manylinux base image does not drop privileges), and build-runtime.sh
+        # writes into the bind-mounted /work/out and the build dir underneath
+        # it. Without HOST_UID/HOST_GID, those paths would be left
+        # root-owned on the runner after the container exits, and the
+        # "Structural checks" / "Package" steps below run directly on the
+        # runner (not in a container) and need normal read/write access to
+        # them. So HOST_UID/HOST_GID ARE set here, deliberately -- unlike the
+        # brief's "unset in CI" comment in build-runtime.sh's own usage text,
+        # that text describes the common case where a build never leaves the
+        # container; this workflow's later steps do leave it, so the
+        # ownership fix-up in build-runtime.sh's exit trap is exercised on
+        # purpose.
+        run: |
+          docker run --rm \
+            -v "${PWD}/dist":/work -v "${PWD}/iree":/iree \
+            -e COMPILER_VERSION="${{ needs.setup.outputs.compiler_version }}" \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -w /work "${BUILD_IMAGE}" \
+            bash -lc '
+              set -euo pipefail
+              export PATH=/opt/python/cp312-cp312/bin:$PATH
+              ./build-runtime.sh --variant ${{ matrix.variant }} \
+                --prefix /work/out --iree-src /iree
+            '
+
+      - name: Structural checks
+        working-directory: dist
+        run: |
+          bash test/build_smoke.sh out
+          bash test/manifest.test.sh out
+          bash test/constants.test.sh out
+          bash test/notices.test.sh out
+          bash test/cmake_additions.test.sh out
+
+      - name: Package
+        working-directory: dist
+        run: |
+          bash scripts/package.sh out \
+            "${{ needs.setup.outputs.iree_version }}" \
+            "${{ matrix.variant }}" "${{ matrix.platform }}" assets
+
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/assets/*.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.variant }}-${{ matrix.platform }}
+          path: dist/assets/
+
+  verify:
+    # The acceptance gate. Runs in a container that has never seen the build tree
+    # or the IREE source -- exactly the consumer's situation. Only the extracted
+    # tarball and the test/consumer harness are mounted in.
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [default]
+        platform: [linux-x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: assets-${{ matrix.variant }}-${{ matrix.platform }}
+          path: assets
+
+      - name: Verify checksum
+        working-directory: assets
+        run: sha256sum -c ./*.sha256
+
+      - name: Extract
+        run: |
+          mkdir -p extracted
+          tar -xzf assets/*.tar.gz -C extracted
+
+      # Same container decision as the build job: rebuild docker/Dockerfile
+      # against the GHA layer cache rather than pulling a registry image or
+      # duplicating the dnf install pins inline. This is a cache hit in the
+      # common case (the build job already populated the cache in this same
+      # workflow run), so the toolchain install is not repeated in practice.
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the pinned manylinux_2_28 image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          file: docker/Dockerfile
+          tags: ${{ env.BUILD_IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Consumer e2e in a clean container
+        run: |
+          prefix="$(find extracted -maxdepth 1 -mindepth 1 -type d)"
+          docker run --rm \
+            -v "${PWD}/test":/test:ro -v "${PWD}/${prefix}":/prefix:ro \
+            -w /tmp "${BUILD_IMAGE}" \
+            bash -lc '
+              set -euo pipefail
+              export PATH=/opt/python/cp312-cp312/bin:$PATH
+              cp -r /test /tmp/t && cp -r /prefix /tmp/p
+              bash /tmp/t/consumer/run.sh /tmp/p
+            '
+
+  pin:
+    needs: [setup, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloaded
+          merge-multiple: true
+      - run: |
+          bash scripts/gen-pin.sh \
+            "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" \
+            "${{ needs.setup.outputs.iree_version }}" \
+            downloaded IreeRuntimePin.cmake
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pin
+          path: IreeRuntimePin.cmake
+
+  release:
+    needs: [setup, verify, pin]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.tar.gz
+            release/*.sha256
+            release/IreeRuntimePin.cmake
+          body: |
+            IREE runtime ${{ needs.setup.outputs.iree_version }} (variant `default`, `linux-x86_64`).
+
+            **Pair with `iree-base-compiler==${{ needs.setup.outputs.compiler_version }}`.**
+            Modules compiled by a different compiler version may fail to load with a VM
+            import signature mismatch. See `share/iree-runtime-dist/manifest.json`.
+
+            The pip `iree-base-runtime` wheel is not linkable at any version; use this artifact.
+
+            Verify before consuming:
+            ```
+            sha256sum -c iree-runtime-${{ needs.setup.outputs.iree_version }}-default-linux-x86_64.tar.gz.sha256
+            gh attestation verify iree-runtime-${{ needs.setup.outputs.iree_version }}-default-linux-x86_64.tar.gz --repo ${{ github.repository }}
+            ```
