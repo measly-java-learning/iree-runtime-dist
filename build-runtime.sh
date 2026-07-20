@@ -318,3 +318,6 @@ bash "$HERE/scripts/gen-constants.sh" "$PREFIX"
 echo "==> generating manifest"
 bash "$HERE/scripts/gen-manifest.sh" "$PREFIX" "$VARIANT" "$PLATFORM" \
   "$IREE_SRC" "$IREE_VERSION" "$COMPILER_VERSION"
+
+echo "==> collecting license notices"
+bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC" "$BUILD_DIR"
