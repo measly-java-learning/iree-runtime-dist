@@ -1,26 +1,20 @@
 name: release
-
-# Pushing a version tag is the ONLY release trigger.
 on:
   push:
-    tags:
-      - "v*.*.*-*"
+    tags: ['v*-*']          # v<iree-version>-<pkgrev>, e.g. v3.11.0-1
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 env:
-  # Single source of truth for the build container's image tag. Built fresh
-  # in every job that needs it (via docker/build-push-action + the GitHub
-  # Actions layer cache), never pulled from a registry -- see the container
-  # decision below.
+  # This image is upstream manylinux_2_28 container with required clang toolchain
   BUILD_IMAGE: iree-runtime-dist-build:manylinux_2_28
 
 jobs:
   setup:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       iree_version: ${{ steps.derive.outputs.iree_version }}
       iree_tag: ${{ steps.derive.outputs.iree_tag }}
@@ -28,17 +22,9 @@ jobs:
       submodules: ${{ steps.submodules.outputs.list }}
       platforms: ${{ steps.platforms.outputs.list }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: derive
-        # Without an explicit shell:, Actions runs this as `bash -e {0}` --
-        # -e WITHOUT pipefail. A failure in derive-version.sh (e.g. a tag that
-        # matches the trigger glob v*.*.*-* but not the script's stricter
-        # pkgrev regex, like v3.11.0-rc1) would then be swallowed by the
-        # pipe: `tr` still exits 0, so the step "succeeds" with all three
-        # outputs empty, and the build job's checkout of iree-org/iree
-        # silently falls back to ref: "" (main) instead of the pinned stable
-        # tag -- exactly the stable-vs-main mix this project exists to
-        # foreclose. `shell: bash` makes Actions invoke
+        # `shell: bash` makes Actions invoke
         # `bash --noprofile --norc -eo pipefail {0}`, so the pipeline's exit
         # status is the failure of any stage, not just the last.
         shell: bash
@@ -59,12 +45,16 @@ jobs:
   build:
     needs: setup
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       matrix:
         variant: [default]
         platform: ${{ fromJson(needs.setup.outputs.platforms) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: dist
 
@@ -72,7 +62,7 @@ jobs:
       # and is unnecessary with IREE_BUILD_COMPILER=OFF. The required set is the
       # tested constant in scripts/lib/submodules.sh, threaded through as
       # needs.setup.outputs.submodules.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: iree-org/iree
           ref: ${{ needs.setup.outputs.iree_tag }}
@@ -83,26 +73,11 @@ jobs:
         working-directory: iree
         run: git submodule update --init --depth 1 ${{ needs.setup.outputs.submodules }}
 
-      # --- Container decision (Task 13) ------------------------------------
-      # A GitHub Actions runner cannot see the locally-built
-      # iree-runtime-dist-build:manylinux_2_28 image from docker/Dockerfile --
-      # it only exists on whatever machine ran scripts/build-image.sh. Rather
-      # than duplicate the pinned `dnf install` NEVRAs inline in this
-      # workflow (which would create a second place that must be kept in
-      # lockstep with docker/Dockerfile), this workflow BUILDS docker/Dockerfile
-      # here, using GitHub Actions' own layer cache (cache-from/cache-to:
-      # type=gha) so the dnf install only actually runs on a cache miss. This
-      # is option (a) from the task brief: it is the honest choice because
-      # docker/Dockerfile stays the single source of truth for the toolchain
-      # NEVRAs and the glibc 2.28 base pin that manifest.json attests to --
-      # there is no second copy of those pins to drift. It is not option (b)
-      # (bare inline dnf install) because that would duplicate the pins, and
-      # it is deliberately NOT a GHCR publish pipeline -- no registry push,
-      # no cross-workflow dependency, just a local `docker build` per job
-      # backed by the GHA cache.
-      - uses: docker/setup-buildx-action@v3
+      # Rather than duplicate the pinned `dnf install` NEVRAs inline in this
+      # workflow build an image placed in the GHA cache (no GHCR publish etc.)
+      - uses: docker/setup-buildx-action@v4.2.0
       - name: Build the pinned manylinux_2_28 image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7.3.0
         with:
           context: docker
           file: docker/Dockerfile
@@ -112,20 +87,9 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build in manylinux
-        # Ownership decision (Task 13): the checkout above is owned by the
-        # runner user, but the container below runs as root by default (the
-        # manylinux base image does not drop privileges), and build-runtime.sh
-        # writes into the bind-mounted /work/out and the build dir underneath
-        # it. Without HOST_UID/HOST_GID, those paths would be left
-        # root-owned on the runner after the container exits, and the
-        # "Structural checks" / "Package" steps below run directly on the
-        # runner (not in a container) and need normal read/write access to
-        # them. So HOST_UID/HOST_GID ARE set here, deliberately -- unlike the
-        # brief's "unset in CI" comment in build-runtime.sh's own usage text,
-        # that text describes the common case where a build never leaves the
-        # container; this workflow's later steps do leave it, so the
-        # ownership fix-up in build-runtime.sh's exit trap is exercised on
-        # purpose.
+        # UID/GID needs to be set here unlike w/ ExecuTorch dist because this runs
+        # one step in a locally build container vs. the other which uses the widely available `manylinux`
+        # container.
         run: |
           docker run --rm \
             -v "${PWD}/dist":/work -v "${PWD}/iree":/iree \
@@ -155,11 +119,11 @@ jobs:
             "${{ needs.setup.outputs.iree_version }}" \
             "${{ matrix.variant }}" "${{ matrix.platform }}" assets
 
-      - uses: actions/attest-build-provenance@v1
+      - uses: actions/attest@v4
         with:
           subject-path: dist/assets/*.tar.gz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: assets-${{ matrix.variant }}-${{ matrix.platform }}
           path: dist/assets/
@@ -170,13 +134,15 @@ jobs:
     # tarball and the test/consumer harness are mounted in.
     needs: [setup, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         variant: [default]
         platform: ${{ fromJson(needs.setup.outputs.platforms) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: assets-${{ matrix.variant }}-${{ matrix.platform }}
           path: assets
@@ -195,9 +161,9 @@ jobs:
       # duplicating the dnf install pins inline. This is a cache hit in the
       # common case (the build job already populated the cache in this same
       # workflow run), so the toolchain install is not repeated in practice.
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4.2.0
       - name: Build the pinned manylinux_2_28 image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7.3.0
         with:
           context: docker
           file: docker/Dockerfile
@@ -206,6 +172,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+        # TODO: This should be moved into a script rather than inlined in the GHA
+        # Note that the docker execution doesn't need UID/GID because nothing needs to leave
+        # the container with predictable ownership permissions
+        # TBH, `ubuntu-latest` includes clang, could probably run the build without
+        # laundering through Docker
       - name: Consumer e2e in a clean container
         run: |
           mapfile -d '' -t prefixes < <(find extracted -maxdepth 1 -mindepth 1 -type d -print0)
@@ -228,9 +199,11 @@ jobs:
   pin:
     needs: [setup, verify]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: downloaded
           merge-multiple: true
@@ -239,7 +212,7 @@ jobs:
             "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" \
             "${{ needs.setup.outputs.iree_version }}" \
             downloaded IreeRuntimePin.cmake
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pin
           path: IreeRuntimePin.cmake
@@ -247,9 +220,11 @@ jobs:
   release:
     needs: [setup, verify, pin]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: release
           merge-multiple: true
@@ -301,10 +276,19 @@ jobs:
           } > release-notes.md
           cat release-notes.md
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/*.tar.gz
-            release/*.sha256
-            release/IreeRuntimePin.cmake
-          body_path: release-notes.md
+      - name: Create/Update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            release/*.tar.gz \
+            release/*.sha256 \
+            release/IreeRuntimePin.cmake \
+            --title "${GITHUB_REF_NAME}" \
+            -F release-notes.md \
+          || gh release upload "${GITHUB_REF_NAME}" \
+            release/*.tar.gz \
+            release/*.sha256 \
+            release/IreeRuntimePin.cmake \
+            --clobber
+
