@@ -164,4 +164,34 @@ done
 # archive silently never lands in $PREFIX/lib despite the export set claiming it exists.
 cmake --install "$BUILD_DIR/build_tools/third_party/printf" --component IREEBundledLibraries --prefix "$PREFIX"
 
+# Remove compiler target files that were installed by the IREECMakeExports component.
+# The IREE compiler is explicitly out of contract for this project (-DIREE_BUILD_COMPILER=OFF),
+# so compiler-only target files must not ship. Specifically:
+#   - IREETargets-Compiler.cmake and IREETargets-Compiler-release.cmake define imported targets
+#     for compiler libraries (e.g., iree_compiler_bindings_c_loader).
+#   - These files' IMPORTED_LOCATION_RELEASE entries point to archives like
+#     libiree_compiler_bindings_c_loader.a that were never built or installed.
+#   - Shipping a targets file with dangling IMPORTED_LOCATION entries reproduces the exact
+#     failure mode this project fixed for runtime: find_package() succeeds, but the first
+#     downstream link fails on a missing file.
+#   - IREERuntimeConfig.cmake includes ONLY IREETargets-Runtime.cmake, so removing these
+#     compiler files cannot break find_package(IREERuntime).
+#
+# Guard: verify that IREERuntimeConfig.cmake does NOT reference "Compiler". If it ever does,
+# removing these files would break downstream consumers, so fail loudly instead.
+runtime_config="$PREFIX/lib/cmake/IREE/IREERuntimeConfig.cmake"
+if [ -e "$runtime_config" ]; then
+  if grep -q "Compiler" "$runtime_config"; then
+    echo "error: IREERuntimeConfig.cmake references 'Compiler'; cannot remove compiler targets" >&2
+    exit 1
+  fi
+else
+  echo "error: IREERuntimeConfig.cmake not found at $runtime_config; install step failed?" >&2
+  exit 1
+fi
+
+# Remove the compiler targets (idempotent: will not fail if already missing).
+rm -f "$PREFIX/lib/cmake/IREE/IREETargets-Compiler.cmake"
+rm -f "$PREFIX/lib/cmake/IREE/IREETargets-Compiler-release.cmake"
+
 echo "==> phase 1 complete"

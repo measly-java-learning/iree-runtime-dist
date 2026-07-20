@@ -21,6 +21,19 @@ if [ -e "$prefix/lib/cmake/IREE/IREECompilerConfig.cmake" ]; then
   ASSERT_FAILS=$((ASSERT_FAILS+1))
 else echo "ok: no compiler config shipped"; fi
 
+# The compiler target files must not ship either. These are separate from IREECompilerConfig.cmake
+# and contain dangling IMPORTED_LOCATION entries pointing to compiler archives that were never
+# installed. Shipping them would cause find_package(IREERuntime) to succeed, then fail at link time.
+for compiler_target in \
+  "lib/cmake/IREE/IREETargets-Compiler.cmake" \
+  "lib/cmake/IREE/IREETargets-Compiler-release.cmake"
+do
+  if [ -e "$prefix/$compiler_target" ]; then
+    echo "FAIL: $compiler_target must not ship (compiler targets out of contract)" >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+  else echo "ok: no compiler target $compiler_target shipped"; fi
+done
+
 # Static archives only.
 if ls "$prefix"/lib/*.a >/dev/null 2>&1; then echo "ok: static archives present"
 else echo "FAIL: no static archives in lib/" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
