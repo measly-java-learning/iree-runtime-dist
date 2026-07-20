@@ -95,4 +95,39 @@ for a in "$prefix"/lib/*.a; do
 done
 if [ "$bad" -eq 0 ]; then echo "ok: archives are PIC"; else ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 
+# Header closure: every header #include "iree/..."-ed directly by the three public
+# entry points a consumer #includes must actually exist under include/. This is the
+# regression test for the defect where api.h #included headers that IREE's generated
+# cmake_install.cmake never installed (see scripts/install-headers.sh) -- a consumer's
+# very first #include "iree/runtime/api.h" would fail to compile. Only checks the direct
+# #includes of the three entry points (not the full transitive closure) -- cheap, and
+# sufficient to catch a regression: any newly-missing header reachable from these three
+# roots shows up here directly, or shows up when *its* header is later added as a fourth
+# entry point.
+checked_headers=0
+missing_headers=0
+for entry in iree/runtime/api.h iree/base/api.h iree/hal/api.h; do
+  entry_path="$prefix/include/$entry"
+  if [ ! -e "$entry_path" ]; then
+    echo "FAIL: entry point $entry missing from prefix, cannot check its header closure" >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+    continue
+  fi
+  while IFS= read -r inc; do
+    [ -n "$inc" ] || continue
+    checked_headers=$((checked_headers+1))
+    if [ ! -e "$prefix/include/$inc" ]; then
+      echo "FAIL: $entry includes \"$inc\" but $prefix/include/$inc does not exist" >&2
+      missing_headers=$((missing_headers+1))
+    fi
+  done < <(grep -ohE '#include[[:space:]]*"iree/[^"]+"' "$entry_path" \
+              | sed -E 's/^#include[[:space:]]*"(.*)"$/\1/')
+done
+if [ "$missing_headers" -eq 0 ] && [ "$checked_headers" -gt 0 ]; then
+  echo "ok: all $checked_headers #include \"iree/...\" references from runtime/api.h, base/api.h, hal/api.h resolve under include/"
+else
+  echo "FAIL: $missing_headers of $checked_headers #include \"iree/...\" references from the public entry points are missing under include/" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+fi
+
 exit "$ASSERT_FAILS"

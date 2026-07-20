@@ -164,6 +164,92 @@ done
 # archive silently never lands in $PREFIX/lib despite the export set claiming it exists.
 cmake --install "$BUILD_DIR/build_tools/third_party/printf" --component IREEBundledLibraries --prefix "$PREFIX"
 
+# build_tools/third_party/libbacktrace has the same EXCLUDE_FROM_ALL shape as printf
+# above, but worse: its CMakeLists.txt has NO install(TARGETS ...) rule at all for the
+# libbacktrace_impl archive, in any component -- so no `cmake --install --component`
+# invocation can ever produce it; `cmake_install.cmake` for that subdirectory contains
+# only boilerplate. Discovered while proving the header fix compiles+links+runs
+# end-to-end (Step 3 of the header-gap fix): iree_base_base's public DEPS include
+# libbacktrace::libbacktrace, an `add_library(... INTERFACE IMPORTED GLOBAL)` target that
+# upstream's own comment says is deliberately "only used internally during build" and not
+# meant to be exported. CMake's install(EXPORT) machinery does not honor that intent: it
+# writes the bare name "libbacktrace_libbacktrace" straight into iree_base_base's
+# INTERFACE_LINK_LIBRARIES in IREETargets-Runtime.cmake, with no corresponding
+# add_library(...IMPORTED) anywhere in the export set (unlike e.g. printf_printf, which
+# IS a real imported target with an IMPORTED_LOCATION -- compare the two in
+# IREETargets-Runtime.cmake). A downstream consumer's CMake can't resolve the bare name as
+# a target, so it falls back to treating it as a raw library name -- the linker sees
+# "-llibbacktrace_libbacktrace" with no matching -L search path, and fails. Fix this the
+# same way CMake's own generator would have, had upstream exported the target: copy the
+# real archive in, then define the missing imported target by hand, pointing
+# IMPORTED_LOCATION at it. This is a distinct defect from the printf install gap and from
+# the missing public headers (scripts/install-headers.sh); flagged for a proper
+# upstream/export-set fix rather than papered over silently -- fail loudly if the build
+# tree doesn't have the archive this depends on, since a silent no-op here is exactly how
+# the header gap shipped.
+_libbacktrace_archive="$BUILD_DIR/build_tools/third_party/libbacktrace/liblibbacktrace_impl.a"
+if [ ! -f "$_libbacktrace_archive" ]; then
+  echo "error: $_libbacktrace_archive not found -- was IREE_ENABLE_LIBBACKTRACE disabled, or the build tree incomplete?" >&2
+  exit 1
+fi
+cp "$_libbacktrace_archive" "$PREFIX/lib/liblibbacktrace_libbacktrace.a"
+
+_targets_runtime="$PREFIX/lib/cmake/IREE/IREETargets-Runtime.cmake"
+_targets_runtime_release="$PREFIX/lib/cmake/IREE/IREETargets-Runtime-release.cmake"
+[ -e "$_targets_runtime" ] || { echo "error: $_targets_runtime not found; install step failed?" >&2; exit 1; }
+[ -e "$_targets_runtime_release" ] || { echo "error: $_targets_runtime_release not found; install step failed?" >&2; exit 1; }
+
+# Idempotent: only patch if a previous run of this script hasn't already. The
+# add_library() block must land BEFORE the "Load information for each installed
+# configuration" section (which globs and includes *-release.cmake, setting
+# IMPORTED_LOCATION_RELEASE on already-declared targets) -- so insert it there
+# rather than appending at end of file.
+if ! grep -q '^add_library(libbacktrace_libbacktrace STATIC IMPORTED)$' "$_targets_runtime"; then
+  marker='# Load information for each installed configuration.'
+  grep -qF "$marker" "$_targets_runtime" || {
+    echo "error: expected marker line not found in $_targets_runtime (IREE's export-set generator changed shape?)" >&2
+    exit 1
+  }
+  _patch="$(mktemp)"
+  cat > "$_patch" <<'EOF'
+# --- iree-runtime-dist patch: see the libbacktrace comment in build-runtime.sh ---
+# Create imported target libbacktrace_libbacktrace (upstream declines to export this
+# target; we define it ourselves so the bare name referenced by iree_base_base's
+# INTERFACE_LINK_LIBRARIES resolves to the archive build-runtime.sh installs).
+add_library(libbacktrace_libbacktrace STATIC IMPORTED)
+
+set_target_properties(libbacktrace_libbacktrace PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
+)
+
+EOF
+  awk -v marker="$marker" -v patchfile="$_patch" '
+    $0 == marker {
+      while ((getline line < patchfile) > 0) print line
+      close(patchfile)
+    }
+    { print }
+  ' "$_targets_runtime" > "$_targets_runtime.tmp"
+  mv "$_targets_runtime.tmp" "$_targets_runtime"
+  rm -f "$_patch"
+fi
+
+if ! grep -q 'IMPORTED_LOCATION_RELEASE "\${_IMPORT_PREFIX}/lib/liblibbacktrace_libbacktrace.a"' "$_targets_runtime_release"; then
+  cat >> "$_targets_runtime_release" <<'EOF'
+
+# --- iree-runtime-dist patch: see the libbacktrace comment in build-runtime.sh ---
+# Import target "libbacktrace_libbacktrace" for configuration "Release"
+set_property(TARGET libbacktrace_libbacktrace APPEND PROPERTY IMPORTED_CONFIGURATIONS RELEASE)
+set_target_properties(libbacktrace_libbacktrace PROPERTIES
+  IMPORTED_LINK_INTERFACE_LANGUAGES_RELEASE "C"
+  IMPORTED_LOCATION_RELEASE "${_IMPORT_PREFIX}/lib/liblibbacktrace_libbacktrace.a"
+  )
+
+list(APPEND _cmake_import_check_targets libbacktrace_libbacktrace )
+list(APPEND _cmake_import_check_files_for_libbacktrace_libbacktrace "${_IMPORT_PREFIX}/lib/liblibbacktrace_libbacktrace.a" )
+EOF
+fi
+
 # Remove compiler target files that were installed by the IREECMakeExports component.
 # The IREE compiler is explicitly out of contract for this project (-DIREE_BUILD_COMPILER=OFF),
 # so compiler-only target files must not ship. Specifically:
@@ -193,6 +279,14 @@ fi
 # Remove the compiler targets (idempotent: will not fail if already missing).
 rm -f "$PREFIX/lib/cmake/IREE/IREETargets-Compiler.cmake"
 rm -f "$PREFIX/lib/cmake/IREE/IREETargets-Compiler-release.cmake"
+
+# Fill in public headers that IREE's generated cmake_install.cmake declares in a
+# target's HDRS but never emits an install(FILES ...) rule for (e.g.
+# iree/base/status.h, iree/hal/buffer.h) -- see scripts/install-headers.sh for
+# the full explanation. Must run AFTER the component installs above so it only
+# fills gaps rather than being overwritten by them.
+. "$HERE/scripts/install-headers.sh"
+install_missing_headers "$PREFIX" "$IREE_SRC"
 
 echo "==> phase 1 complete"
 
