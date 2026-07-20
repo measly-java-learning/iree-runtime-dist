@@ -131,6 +131,22 @@ cmake -G Ninja -B "$BUILD_DIR" -S "$IREE_SRC" \
 echo "==> building"
 cmake --build "$BUILD_DIR"
 
+# libbacktrace is NOT in the `all` target, so the build above does not produce it.
+# Upstream adds the directory with
+#   add_subdirectory(build_tools/third_party/libbacktrace EXCLUDE_FROM_ALL)
+# and the only edge to it runs through libbacktrace::libbacktrace, an
+# `INTERFACE IMPORTED` target -- and IMPORTED targets carry no build-order
+# dependency. So iree_base_base "depends on" libbacktrace in the link sense while
+# nothing ever schedules the archive to be compiled. Verified against the
+# generated build.ninja: the `all` phony edge has no libbacktrace input.
+#
+# This must be an explicit --target build, and it must run BEFORE the install
+# phase copies the archive into the prefix (see the libbacktrace repair below).
+# The archive is only produced on Linux with IREE_ENABLE_LIBBACKTRACE ON, which is
+# the default there and what effective_cmake_flags relies on; if that ever stops
+# holding, the existence assert below is the thing that catches it, not this line.
+cmake --build "$BUILD_DIR" --target libbacktrace_impl
+
 echo "==> installing to $PREFIX"
 # The step the walking skeleton skipped. Running it is what makes the export set
 # real -- and with it the flatcc transitives, the IREE_ALLOCATOR_SYSTEM_CTL define,
