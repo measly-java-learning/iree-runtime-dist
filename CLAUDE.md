@@ -1,0 +1,127 @@
+# CLAUDE.md
+
+Guidance for Claude Code working in this repository.
+
+## What this repo is
+
+CI infrastructure that builds the IREE **runtime** and publishes attested, hash-pinned tarballs.
+It produces *artifacts*, not a library — a build recipe plus packaging plus CI. No GitHub repo
+exists for this project yet; the pin generator has only been run against a placeholder org slug.
+Don't write or imply commands against a real release URL.
+
+Design: `docs/superpowers/specs/2026-07-19-iree-runtime-dist-design.md`.
+
+## Key commands
+
+```bash
+bash test/run.sh                                    # hermetic unit tests; no build, no container
+./build-runtime.sh --print-flags --variant default   # effective cmake flags without building
+bash test/build_smoke.sh out                          # structural check of a built prefix
+bash test/consumer/run.sh out                         # consumer e2e (run in a clean container)
+```
+
+## Hard constraints
+
+- **The compiler is out of contract.** `-DIREE_BUILD_COMPILER=OFF` always. Never build or ship
+  `iree-compile`. It appears only as a version string in `manifest.json` and a CI-time pip wheel
+  used to compile `add.vmfb`.
+- **Never `submodules: recursive`.** IREE's `check_submodule_init.py --runtime_only` hard-requires
+  every path in `runtime_submodules.txt` — 11 paths, all listed in `scripts/lib/submodules.sh` —
+  regardless of which HAL drivers/loaders are enabled. `third_party/llvm-project` (2.6 GB) is not
+  one of them and is never needed.
+- **Two lists, two different jobs — do not conflate them.**
+  `scripts/lib/submodules.sh` (`IREE_REQUIRED_SUBMODULES`) is a *checkout gate*: what IREE's own
+  configure step demands exist on disk. `scripts/lib/linked-components.sh`
+  (`IREE_LINKED_COMPONENTS`) is the *notices input*: what's actually reachable from
+  `iree_runtime_unified`'s transitive `INTERFACE_LINK_LIBRARIES` closure, verified against the
+  built archives with `nm`. Most required-submodule paths are never linked. Generating
+  `THIRD-PARTY-NOTICES/` from the submodule list instead of the linked-components list would
+  over-claim licenses for code that isn't in the artifact — the same category of error as
+  claiming LLVM.
+- **Upstream CMake files ship unmodified**, with exactly two sanctioned, narrow, commented
+  exceptions: `relocatability_repair` (path rewriting) and `config_repair_external_deps`
+  (adding the missing `find_package(Threads)` call). Anything else added lives in
+  `lib/cmake/IreeRuntimeDist/`. Editing `lib/cmake/IREE/IREETargets-Runtime.cmake` beyond those
+  two repairs is a test failure (`test/cmake_additions.test.sh` checks for it).
+- **v1 is stable `v3.11.0` only. Never `main`.** Mixing a main-branch runtime with a stable
+  compiler is exactly the VM import-signature mismatch this project exists to prevent. Never
+  point `--iree-src` at `/home/corey/workspace/iree` — that checkout tracks `main`, not the
+  pinned `v3.11.0` tag this recipe, `manifest.json`, and the paired `add.vmfb` all assume.
+
+## Architecture
+
+`build-runtime.sh` runs four phases: build+install, relocatability repair+assert, generate
+metadata, pair with the compiler.
+
+Phase 1's `cmake --install` is load-bearing but not sufficient by itself — IREE marks every
+library install rule `EXCLUDE_FROM_ALL`, so a bare install ships zero archives and zero headers
+even though the export set still looks complete. The recipe installs three named components
+(`IREEDevLibraries-Runtime`, `IREEBundledLibraries`, `IREECMakeExports`) and then repairs four
+separate upstream packaging gaps found the hard way: the `printf` subdirectory's install never
+chains into the parent (needs an explicit second `cmake --install --component`), `libbacktrace`
+has no `install(TARGETS ...)` rule at all for its archive and its target is never exported
+(hand-copy the archive, hand-write the imported-target block), `IREERuntimeConfig.cmake` never
+`find_package(Threads)`s before including the targets file (breaks bare `find_package` at
+*configure* time, not link time), and several public headers are declared in a target's `HDRS`
+but never get an `install(FILES ...)` rule generated (`scripts/install-headers.sh` walks the real
+`#include` graph and fills the gap from source). None of these are "reconstruct IREE's build" —
+each is a specific, load-bearing, commented repair for a specific upstream omission. Do not
+"simplify" any of them back toward a bare install; that is precisely what silently ships an
+empty or half-broken package.
+
+`scripts/lib/*.sh` are sourced by both the build and CI so the two cannot drift. When changing
+what they define, change it there, not at a call site. `effective_cmake_flags` in particular
+feeds the build, `--print-flags`, and `BUILDINFO`/`manifest.json` provenance, so recorded
+provenance cannot diverge from the build that produced it.
+
+A prebuilt build image (`docker/Dockerfile` → `iree-runtime-dist-build:manylinux_2_28`, built by
+`scripts/build-image.sh`) pins the toolchain (clang/lld/ninja NEVRAs) and saves the `dnf install`
+tax on every invocation. CI cannot pull this local image — a GH runner never sees it — so
+`release.yml` instead builds `docker/Dockerfile` itself in every job that needs it, backed by
+GitHub Actions' layer cache (`cache-from`/`cache-to: type=gha`), so `docker/Dockerfile` stays the
+single source of truth for the toolchain pins and the `glibc_build` value `manifest.json` attests
+to, with no second copy to drift.
+
+## manifest.json
+
+`schema_version: 2`. `glibc_build` records the glibc of the container the archives were
+*compiled against* (2.28) — it is not a compatibility floor and must never be described as one.
+Static archives carry unversioned undefined libc symbols; glibc symbol-version resolution happens
+at the *consumer's* final link, not in the archive, so scanning `.a` files for `GLIBC_x.y`
+strings is structurally incapable of producing a floor. `gen-manifest.sh` documents this in the
+manifest's own `notes.glibc_build` field — keep that note in sync with any future change to how
+this value is computed.
+
+## Testing
+
+Two layers. Hermetic `test/*.test.sh` need no build and run via `test/run.sh`. Tests taking a
+`<prefix>` argument skip when given none, so `run.sh` stays hermetic.
+
+`test/consumer/` is the acceptance gate: extract the tarball in a container with no build tree and
+no IREE source, `find_package`, compile, load `add.vmfb`, run it, assert the result — once per
+driver name (`local-sync`, `local-task` — exact driver names, not URIs;
+`iree_runtime_instance_try_create_default_device` does an exact string compare against the
+registered driver name, so `"local-sync://"` fails to resolve). It transitively proves
+relocatability, link surface, compile-define propagation, ABI pairing, and the glibc build
+provenance. `test/consumer/consumer.c` is meant to be exactly what a real downstream consumer
+would write — not a harness with extra scaffolding a real caller wouldn't have. A harness that
+quietly differs from a real caller (e.g. linking against the build tree instead of the packaged
+prefix, or skipping a driver) can mask a real defect; if the harness needs to change, ask whether
+a real consumer would hit the same change first.
+
+Relocatability has a repair step *and* an assertion (`scripts/relocatability.sh`). If the
+assertion fires, extend the repair — never weaken the assertion. The assertion is only meaningful
+when `relocatability_assert` is invoked with the **container-internal** build and source paths
+(e.g. `/work/iree-build-default`, `/iree`), not host paths — `build-runtime.sh` passes
+`$BUILD_DIR`/`$IREE_SRC` resolved from inside the container, and that's deliberate: checking for
+leaked *host* paths (which never appear in the build in the first place) would make the assertion
+pass trivially without proving anything. Run the recipe inside the container end to end so the
+paths the assertion checks are the ones that could actually leak.
+
+## Conventions
+
+- `set -euo pipefail` in every script. `grep` exits 1 on no-match and aborts under `set -e`; guard
+  with `|| true`.
+- The recipe is idempotent: re-runs must not fail on existing build trees or already-patched
+  export files (see the `grep -q` idempotency guards in `build-runtime.sh` Phase 1).
+- Design docs and plans live in `docs/superpowers/{specs,plans}/`.
