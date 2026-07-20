@@ -130,4 +130,70 @@ else
   ASSERT_FAILS=$((ASSERT_FAILS+1))
 fi
 
+# The shipped IREERuntimeConfig.cmake must re-find its own external deps.
+# Upstream's config is a 3-line stub that only includes the targets file, but
+# IREETargets-Runtime.cmake references the imported target Threads::Threads
+# (e.g. via iree_vm_impl) without defining it. Without a find_package(Threads)
+# call BEFORE the include, a naive consumer's bare find_package(IREERuntime)
+# fails to even configure with:
+#   "The link interface of target ... contains: Threads::Threads
+#    but the target was not found."
+# See scripts/config-deps.sh for the full explanation and the repair.
+runtime_config="$prefix/lib/cmake/IREE/IREERuntimeConfig.cmake"
+if [ -e "$runtime_config" ] && grep -q 'find_package(Threads' "$runtime_config"; then
+  echo "ok: IREERuntimeConfig.cmake re-finds Threads before including targets"
+else
+  echo "FAIL: IREERuntimeConfig.cmake missing find_package(Threads) -- naive consumers cannot configure" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+fi
+
+# Broader check: no INTERFACE_LINK_LIBRARIES entry in the exported targets file
+# may reference a Foo::Bar-style imported target that isn't either (a) defined
+# by this same export set (add_library(Foo::Bar ... IMPORTED)) or (b) resolved
+# by a find_package(...) call this config file makes. This is a general version
+# of the Threads check above -- it would have caught the Threads gap without
+# needing to know "Threads" by name, and it will catch the next such gap if an
+# IREE version bump introduces one. Implemented as a Python-free, awk/grep pass:
+# collect every "Namespace::Name" token appearing in any INTERFACE_LINK_LIBRARIES
+# property, subtract the ones this export set itself defines via
+# "add_library(Namespace::Name ... IMPORTED)", and for whatever remains, require
+# the config file to name-check for it via find_package(<Namespace-ish-name>).
+# We only have one real-world case to generalize from (Threads::Threads is
+# resolved by find_package(Threads)), so the mapping from "Foo::Bar" to the
+# find_package name is approximated as the namespace segment before "::" --
+# good enough for CMake's own find modules (Threads, OpenSSL, ZLIB, ...), which
+# is the class of dependency this check exists to catch.
+targets_runtime="$prefix/lib/cmake/IREE/IREETargets-Runtime.cmake"
+if [ -e "$targets_runtime" ]; then
+  dangling=""
+  while IFS= read -r tok; do
+    [ -n "$tok" ] || continue
+    case "$tok" in
+      *::*) : ;;
+      *) continue ;;
+    esac
+    if grep -qF "add_library($tok " "$targets_runtime"; then
+      continue
+    fi
+    ns="${tok%%::*}"
+    if [ -e "$runtime_config" ] && grep -qE "find_package\([[:space:]]*${ns}[[:space:]]" "$runtime_config"; then
+      continue
+    fi
+    dangling="$dangling $tok"
+  done < <(grep -oE 'INTERFACE_LINK_LIBRARIES[[:space:]]+"[^"]*"' "$targets_runtime" \
+              | sed -E 's/^INTERFACE_LINK_LIBRARIES[[:space:]]+"(.*)"$/\1/' \
+              | tr ';' '\n' \
+              | sed -E 's/\$<[A-Z_]+:(.*)>/\1/' \
+              | sort -u)
+  if [ -n "$dangling" ]; then
+    echo "FAIL: INTERFACE_LINK_LIBRARIES references imported target(s) neither exported nor find_package'd by the config:$dangling" >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+  else
+    echo "ok: no dangling Foo::Bar imported-target references in IREETargets-Runtime.cmake"
+  fi
+else
+  echo "FAIL: $targets_runtime missing, cannot check for dangling imported targets" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+fi
+
 exit "$ASSERT_FAILS"

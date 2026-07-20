@@ -288,6 +288,12 @@ rm -f "$PREFIX/lib/cmake/IREE/IREETargets-Compiler-release.cmake"
 . "$HERE/scripts/install-headers.sh"
 install_missing_headers "$PREFIX" "$IREE_SRC"
 
+# Patch IREERuntimeConfig.cmake to find_package(Threads) before including the
+# targets file -- upstream's config never does, so a naive consumer's bare
+# find_package(IREERuntime) fails to configure. See scripts/config-deps.sh.
+. "$HERE/scripts/config-deps.sh"
+config_repair_external_deps "$PREFIX"
+
 echo "==> phase 1 complete"
 
 # --- Phase 2: relocatability repair, then proof ------------------------------
