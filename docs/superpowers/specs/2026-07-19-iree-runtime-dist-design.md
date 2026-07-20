@@ -30,7 +30,18 @@ removed or reshaped a requirement.
   and `install(EXPORT)` machinery exist (`build_tools/cmake/CMakeLists.txt:35-44`). The config
   includes `IREETargets-Runtime.cmake`, the full export set with each target's `INTERFACE`
   properties.
-- **Therefore wishlist item #2 largely dissolves.** Its five sub-problems — archive selection,
+- **But `cmake --install` alone installs neither archives nor headers.** Discovered during
+  implementation (Task 4): `build_tools/cmake/iree_install_support.cmake:66,94` marks the
+  library install rules `EXCLUDE_FROM_ALL`, so a bare `cmake --install` yields only `bin/`
+  and `lib/cmake/`. The export set is still generated and complete — 197
+  `IMPORTED_LOCATION` entries — but every one points at a `lib/*.a` that was never
+  installed, so `find_package` succeeds and the *link* fails. That is a worse failure mode
+  than a missing package. The install must name components explicitly:
+  `IREEDevLibraries-Runtime` (headers + archives), `IREEBundledLibraries` (flatcc et al.),
+  and `IREECMakeExports` (config). `IREETools-Runtime` is excluded to keep the artifact
+  contract at lib/include/share; `IREEDevLibraries-Compiler` must never be installed.
+- **Therefore wishlist item #2 largely dissolves — conditional on that install being right.**
+  Its five sub-problems — archive selection,
   transitive flatcc archives, compile defines, split include dirs, link ordering — are all CMake
   target properties carried by that export set. They were painful downstream *only* because the
   build was never installed. Confirmed specifically for the hardest one: the
