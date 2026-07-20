@@ -39,18 +39,26 @@ relocatability_assert() { # <prefix> <build_path> <src_path>
 
   for needle in "$build" "$src"; do
     # Match the needle only at a genuine path boundary (not preceded by an
-    # identifier/path character). Without this, a short mount point like
-    # "/iree" false-positives constantly: IREE's own tree nests a directory
-    # literally named iree (.../src/iree/async/foo.c, already relative
-    # thanks to -ffile-prefix-map, still contains the substring "/iree/"),
-    # doc comments link to https://github.com/iree-org/iree/..., and archive
+    # identifier/path character), OR immediately after a compiler flag
+    # prefix that concatenates directly onto its argument. Without the
+    # boundary rule, a short mount point like "/iree" false-positives
+    # constantly: IREE's own tree nests a directory literally named iree
+    # (.../src/iree/async/foo.c, already relative thanks to
+    # -ffile-prefix-map, still contains the substring "/iree/"), doc
+    # comments link to https://github.com/iree-org/iree/..., and archive
     # string tables pad entries with runs of '/' that can precede an
     # otherwise-correctly-relative path. None of those are an absolute
     # build-machine path leaking into the prefix; a real leak is preceded by
-    # a delimiter (quote, whitespace, NUL, start-of-line), never by another
-    # path/word character. Escape the needle so it's matched literally.
+    # a delimiter (quote, whitespace, '=', ':', NUL, start-of-line) -- or,
+    # critically, by a flag like -I/-L/-isystem/-F with no space before the
+    # absolute path, which is exactly how CMake bakes include/lib dirs into
+    # generated config files (e.g. "-I/iree/runtime/src"). The generic
+    # boundary class alone rejects that case because the flag's own letter
+    # (I, L, ...) is a word character, so the flag prefixes are enumerated
+    # explicitly as additional, non-generic boundaries. Escape the needle so
+    # it's matched literally.
     escaped="$(printf '%s' "$needle" | sed -E 's/[][(){}.*+?^$|\\]/\\&/g')"
-    hits="$(grep -rlE -- "(^|[^A-Za-z0-9_./-])${escaped}" "$prefix" 2>/dev/null || true)"
+    hits="$(grep -rlE -- "(^|[^A-Za-z0-9_./-]|-I|-L|-isystem|-F)${escaped}" "$prefix" 2>/dev/null || true)"
     if [ -n "$hits" ]; then
       echo "error: build-machine path '$needle' leaked into the staged prefix:" >&2
       printf '  %s\n' $hits >&2

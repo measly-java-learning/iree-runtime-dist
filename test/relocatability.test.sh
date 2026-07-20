@@ -44,4 +44,39 @@ if relocatability_assert "$tmp" "/build/tree" "/nonexistent/src" >/dev/null 2>&1
   echo "FAIL: leaked build path should fail the assertion" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
 else echo "ok: leaked build path fails the assertion"; fi
 
+# --- Matcher gap regression: build+src needle boundary rule -----------------
+# Each case gets its own fresh single-file prefix so results can't be
+# confounded by another case's content living in the same tree.
+BUILD_NEEDLE="/work/iree-build-default"
+SRC_NEEDLE="/iree"
+
+# assert_flagged/assert_not_flagged <case-name> <file-content>
+assert_flagged() {
+  local name="$1" content="$2" d
+  d="$(mktemp -d)"
+  printf '%s\n' "$content" > "$d/sample.txt"
+  if relocatability_assert "$d" "$BUILD_NEEDLE" "$SRC_NEEDLE" >/dev/null 2>&1; then
+    echo "FAIL: $name should be flagged" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+  else echo "ok: $name flagged"; fi
+  rm -rf "$d"
+}
+assert_not_flagged() {
+  local name="$1" content="$2" d
+  d="$(mktemp -d)"
+  printf '%s\n' "$content" > "$d/sample.txt"
+  if relocatability_assert "$d" "$BUILD_NEEDLE" "$SRC_NEEDLE" >/dev/null 2>&1; then
+    echo "ok: $name not flagged"
+  else echo "FAIL: $name should not be flagged" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+  rm -rf "$d"
+}
+
+assert_flagged     "quoted abs src"      'set(X "/iree/runtime/src")'
+assert_flagged     "-I flag abs src"     'target_compile_options(t -I/iree/runtime/src)'
+assert_flagged     "abs build dir"       'set(Y "/work/iree-build-default/lib")'
+assert_flagged     "bare abs at BOL"     '/iree/runtime/src/foo.c'
+assert_not_flagged "relative include"    '#include "iree/base/api.h"'
+assert_not_flagged "relative __FILE__"   'static const char f[] = "iree/vm/context.c";'
+assert_not_flagged "nested src path"     'runtime/src/iree/async/foo.c'
+assert_not_flagged "upstream URL"        '// see https://github.com/iree-org/iree/blob/main/x.md'
+
 exit "$ASSERT_FAILS"
