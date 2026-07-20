@@ -2,6 +2,10 @@ out/
 out-*/
 iree-build/
 iree-build-*/
+# scripts/package.sh output: the tarball and its .sha256. Release assets are
+# published from CI, never committed.
+assets/
+assets-*/
 dist/
 spike/*.log
 __pycache__/
