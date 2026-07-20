@@ -306,3 +306,7 @@ echo "==> asserting relocatability"
 relocatability_assert "$PREFIX" "$(cd "$BUILD_DIR" && pwd)" "$(cd "$IREE_SRC" && pwd)"
 
 echo "==> phase 2 complete"
+
+# --- Phase 3: generated metadata --------------------------------------------
+echo "==> generating constants"
+bash "$HERE/scripts/gen-constants.sh" "$PREFIX"
