@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Structural smoke check of an already-built prefix. Usage: build_smoke.sh <prefix>
+set -u
+here="$(cd "$(dirname "$0")" && pwd)"
+. "$here/assert.sh"
+prefix="${1:?usage: build_smoke.sh <prefix>}"
+
+for f in \
+  "lib/cmake/IREE/IREERuntimeConfig.cmake" \
+  "lib/cmake/IREE/IREETargets-Runtime.cmake" \
+  "include/iree/runtime/api.h" \
+  "include/iree/base/api.h"
+do
+  if [ -e "$prefix/$f" ]; then echo "ok: $f present"
+  else echo "FAIL: $f missing from prefix" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+done
+
+# The compiler is out of contract; its config must not ship.
+if [ -e "$prefix/lib/cmake/IREE/IREECompilerConfig.cmake" ]; then
+  echo "FAIL: IREECompilerConfig.cmake must not ship (compiler is out of contract)" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+else echo "ok: no compiler config shipped"; fi
+
+# Static archives only.
+if ls "$prefix"/lib/*.a >/dev/null 2>&1; then echo "ok: static archives present"
+else echo "FAIL: no static archives in lib/" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+
+# The unified runtime archive specifically -- this is the target a downstream
+# consumer links against. IREE's install rules are EXCLUDE_FROM_ALL (see
+# build-runtime.sh comments), so a bare `cmake --install` produces a complete
+# looking export set that points at archives which were never actually copied.
+# Check the archive a downstream consumer actually links exists and is non-empty.
+unified="$prefix/lib/libiree_runtime_unified.a"
+if [ -s "$unified" ]; then echo "ok: libiree_runtime_unified.a present and non-empty"
+else echo "FAIL: $unified missing or empty" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+
+# flatcc is a bundled transitive dependency (IREEBundledLibraries component);
+# it must be installed too or the link surface is incomplete.
+for f in libflatcc_runtime.a libflatcc_parsing.a; do
+  if [ -s "$prefix/lib/$f" ]; then echo "ok: $f present and non-empty"
+  else echo "FAIL: $prefix/lib/$f missing or empty" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+done
+
+# Every IMPORTED_LOCATION_RELEASE path in the generated export set must actually
+# exist on disk. This is the assertion that catches an EXCLUDE_FROM_ALL-induced
+# partial install directly: a bare `cmake --install` leaves the export set
+# complete-looking (every target defined, every property set) while every
+# IMPORTED_LOCATION points at a file that was never copied -- so find_package()
+# succeeds and the failure only shows up later, at a downstream consumer's link
+# step. Catch it here instead.
+targets_release="$prefix/lib/cmake/IREE/IREETargets-Runtime-release.cmake"
+if [ -e "$targets_release" ]; then
+  checked=0
+  missing=0
+  while IFS= read -r rel_path; do
+    [ -n "$rel_path" ] || continue
+    checked=$((checked+1))
+    abs_path="$prefix/${rel_path#\$\{_IMPORT_PREFIX\}/}"
+    if [ ! -e "$abs_path" ]; then
+      echo "FAIL: exported IMPORTED_LOCATION_RELEASE missing on disk: $abs_path" >&2
+      missing=$((missing+1))
+    fi
+  done < <(grep -o 'IMPORTED_LOCATION_RELEASE "[^"]*"' "$targets_release" \
+              | sed -E 's/^IMPORTED_LOCATION_RELEASE "(.*)"$/\1/')
+  if [ "$missing" -eq 0 ] && [ "$checked" -gt 0 ]; then
+    echo "ok: all $checked exported IMPORTED_LOCATION_RELEASE paths exist on disk"
+  else
+    echo "FAIL: $missing of $checked exported IMPORTED_LOCATION_RELEASE paths missing" >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+  fi
+else
+  echo "FAIL: $targets_release missing, cannot verify exported paths" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+fi
+
+# PIC: a non-PIC x86-64 archive shows R_X86_64_32/32S relocations.
+bad=0
+for a in "$prefix"/lib/*.a; do
+  if readelf -r "$a" 2>/dev/null | grep -qE 'R_X86_64_(32|32S)[[:space:]]'; then
+    echo "FAIL: non-PIC relocations in $(basename "$a")" >&2; bad=1
+  fi
+done
+if [ "$bad" -eq 0 ]; then echo "ok: archives are PIC"; else ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+
+exit "$ASSERT_FAILS"
