@@ -1874,7 +1874,7 @@ vmfb="$PREFIX/share/iree-runtime-dist/add.vmfb"
 # Both drivers ship in one tarball and the consumer picks at runtime, so both
 # must work. The local-task pass is where a TSan leg lands later.
 fails=0
-for uri in "local-sync://" "local-task://"; do
+for uri in "local-sync" "local-task"; do
   echo "==> running with $uri"
   if "$build/consumer" "$vmfb" "$uri"; then
     echo "ok: $uri"
@@ -1905,10 +1905,10 @@ docker run --rm -v "$PWD":/work:ro -v "$PWD/out":/prefix:ro \
 
 Expected:
 ```
-ok: add.vmfb ran on local-sync:// and produced the expected result
-ok: local-sync://
-ok: add.vmfb ran on local-task:// and produced the expected result
-ok: local-task://
+ok: add.vmfb ran on local-sync and produced the expected result
+ok: local-sync
+ok: add.vmfb ran on local-task and produced the expected result
+ok: local-task
 CONSUMER E2E PASSED
 ```
 
@@ -2409,8 +2409,8 @@ Both CPU drivers ship in one tarball; you select at runtime by device URI:
 
 | URI | Behavior |
 |---|---|
-| `local-sync://` | Inline, single-threaded. No IREE-internal threads. |
-| `local-task://` | Worker pool for CPU intra-op parallelism. |
+| `local-sync` | Inline, single-threaded. No IREE-internal threads. |
+| `local-task` | Worker pool for CPU intra-op parallelism. |
 
 ## Cutting a release
 
@@ -2535,7 +2535,7 @@ git commit -m "docs: README and CLAUDE.md"
 Each is a milestone with its own spec/plan cycle:
 
 - **`devtools` variant** — Tracy tracing + allocation statistics. Adds `third_party/tracy` to the submodule set and a second matrix cell.
-- **TSan leg** — meaningful now only against `local-task://`, since threading became a runtime selection.
+- **TSan leg** — meaningful now only against `local-task`, since threading became a runtime selection.
 - **`windows-x86_64`** — MSVC, CRT `/MD` vs `/MT` matrix.
 - **GPU axis** — CUDA/Vulkan/HIP drivers. Not a flag flip: needs GPU-target compilation, matching loaders, and breaks the consumer's CPU-coherent-memory assumption.
 - **Tracking IREE `main`** — keys releases on a nightly compiler version and resolves it to a runtime commit.

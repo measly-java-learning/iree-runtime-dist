@@ -142,7 +142,7 @@ compiler, only the dist can ship an artifact guaranteed to load. A consumer can 
 
 The wishlist proposed `minimal` (local-sync) and `perf` (+local-task) as separate tarballs. The
 reference build shows both drivers compiling into one build, and driver selection is a runtime
-choice by device URI (`local-sync://` vs `local-task://`). They therefore collapse into a single
+choice by device URI (`local-sync` vs `local-task`). They therefore collapse into a single
 `default` variant carrying both drivers and both executable loaders (`embedded-elf`,
 `system-library`).
 
@@ -241,7 +241,7 @@ notice collection, and the required-submodule set.
 **Consumer e2e — the acceptance gate.** In a clean container with no build tree and no IREE
 source: extract the tarball, `find_package(IREERuntime)`, compile a small C consumer, load the
 shipped `add.vmfb`, run it, and assert the numeric result. Run it once per device URI
-(`local-sync://`, `local-task://`); the `local-task` pass is where a TSan leg lands later.
+(`local-sync`, `local-task`); the `local-task` pass is where a TSan leg lands later.
 
 This single test transitively proves relocatability, correct link surface, compile-define
 propagation, compiler↔runtime ABI pairing, glibc floor, and that both drivers work. Passing in a
