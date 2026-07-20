@@ -19,17 +19,25 @@ mkdir -p "$OUT_DIR"
 
 RUNTIME_COMMIT="$(git -C "$IREE_SRC" rev-parse HEAD)"
 
-# Scan installed static archives for the highest GLIBC symbol-version requirement.
-# `grep` under set -e would abort the whole script on a no-match page (e.g. no
-# archives found, or none reference glibc symbol versioning), so every stage of
-# this pipe is tolerant and the final fallback to "none" is explicit.
-GLIBC_FLOOR="$(
-  find "$PREFIX/lib" -name '*.a' -print0 2>/dev/null \
-    | xargs -0 -r readelf -sW 2>/dev/null \
-    | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
-    | sort -uV | tail -1 || true
-)"
-[ -n "$GLIBC_FLOOR" ] || GLIBC_FLOOR="none"
+# NOTE: static archives carry unversioned undefined libc symbols (glibc symbol
+# versioning is resolved at final link against the shared libc, never recorded
+# in a .a). Scanning the archives for GLIBC_x.y symbol-version strings therefore
+# cannot answer "what glibc does this need" -- it always yields nothing, and
+# reporting that as a floor of "none" would misleadingly imply no constraint.
+#
+# What we CAN honestly attest is the glibc of the environment these archives
+# were compiled in (this script must run inside that same environment --
+# build-runtime.sh's Phase 3 call happens inside the manylinux container, and
+# a standalone regen must be invoked the same way, e.g. via `docker run`).
+# Prefer getconf; fall back to parsing `ldd --version`. Every stage is
+# tolerant of failure (`|| true`) since `grep`/`getconf` exiting non-zero
+# under `set -euo pipefail` would otherwise abort the whole script -- and an
+# explicit "unknown" beats a silent empty string or an assumed value.
+GLIBC_BUILD="$(getconf GNU_LIBC_VERSION 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)"
+if [ -z "$GLIBC_BUILD" ]; then
+  GLIBC_BUILD="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | tail -1 || true)"
+fi
+[ -n "$GLIBC_BUILD" ] || GLIBC_BUILD="unknown"
 
 # build_config comes from the same function the build used.
 BUILD_CONFIG_JSON="$(
@@ -52,21 +60,21 @@ print(json.dumps(cfg, indent=4, sort_keys=True))
 # smuggle content into the JSON. Reading from sys.argv keeps each value an opaque
 # string as far as the Python parser is concerned.
 python3 - "$OUT_DIR/manifest.json" "$VARIANT" "$PLATFORM" "$IREE_VERSION" \
-  "$RUNTIME_COMMIT" "$COMPILER_VERSION" "$GLIBC_FLOOR" "$BUILD_CONFIG_JSON" <<'EOF'
+  "$RUNTIME_COMMIT" "$COMPILER_VERSION" "$GLIBC_BUILD" "$BUILD_CONFIG_JSON" <<'EOF'
 import json, sys
 
 (_, out_path, variant, platform, iree_version, runtime_commit,
- compiler_version, glibc_floor, build_config_json) = sys.argv
+ compiler_version, glibc_build, build_config_json) = sys.argv
 
 manifest = {
-    "schema_version": 1,
+    "schema_version": 2,
     "variant": variant,
     "platform": platform,
     "iree_version": iree_version,
     "iree_tag": "v" + iree_version,
     "runtime_commit": runtime_commit,
     "iree_compile_version": compiler_version,
-    "glibc_floor": glibc_floor,
+    "glibc_build": glibc_build,
     "build_config": json.loads(build_config_json),
     "notes": {
         "compiler": (
@@ -79,6 +87,14 @@ manifest = {
             "The pip iree-base-runtime wheel is NOT linkable at any version -- "
             "no headers, no static libs. Only a from-source build or this dist "
             "yields a linkable runtime."
+        ),
+        "glibc_build": (
+            "glibc_build is the glibc version of the container these static "
+            "archives were compiled against, NOT a detected minimum/floor -- "
+            "static archives carry unversioned undefined libc symbols, so the "
+            "consumer's own final link is what actually resolves glibc symbol "
+            "versions. Do not read this as a guarantee of compatibility with "
+            "any glibc older than the value recorded here."
         ),
     },
 }
@@ -95,7 +111,7 @@ platform=$PLATFORM
 iree_version=$IREE_VERSION
 runtime_commit=$RUNTIME_COMMIT
 iree_compile_version=$COMPILER_VERSION
-glibc_floor=$GLIBC_FLOOR
+glibc_build=$GLIBC_BUILD
 cmake_flags=$(effective_cmake_flags "$VARIANT" | tr '\n' ' ')
 EOF
 
