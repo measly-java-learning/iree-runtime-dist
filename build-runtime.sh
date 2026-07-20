@@ -321,3 +321,11 @@ bash "$HERE/scripts/gen-manifest.sh" "$PREFIX" "$VARIANT" "$PLATFORM" \
 
 echo "==> collecting license notices"
 bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC" "$BUILD_DIR"
+
+echo "==> phase 3 complete"
+
+# --- Phase 4: pair with the compiler ----------------------------------------
+echo "==> compiling paired smoke artifact"
+bash "$HERE/scripts/gen-addvmfb.sh" "$PREFIX" "$COMPILER_VERSION"
+
+echo "==> build complete: $PREFIX"

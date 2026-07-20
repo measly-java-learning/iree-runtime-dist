@@ -196,4 +196,7 @@ else
   ASSERT_FAILS=$((ASSERT_FAILS+1))
 fi
 
+if [ -s "$prefix/share/iree-runtime-dist/add.vmfb" ]; then echo "ok: add.vmfb present"
+else echo "FAIL: add.vmfb missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+
 exit "$ASSERT_FAILS"
