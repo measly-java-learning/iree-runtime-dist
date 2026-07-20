@@ -63,6 +63,10 @@ if [ -z "$BUILD_DIR" ]; then
   BUILD_DIR="$(dirname "$PREFIX")/iree-build-${VARIANT}"
 fi
 
+PLATFORM="linux-x86_64"
+IREE_VERSION="$(git -C "$IREE_SRC" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "unknown")"
+COMPILER_VERSION="${COMPILER_VERSION:-$IREE_VERSION}"
+
 echo "build-runtime.sh: variant=$VARIANT prefix=$PREFIX build-dir=$BUILD_DIR"
 
 # This script runs inside a container with a bind-mounted volume, so everything
@@ -310,3 +314,7 @@ echo "==> phase 2 complete"
 # --- Phase 3: generated metadata --------------------------------------------
 echo "==> generating constants"
 bash "$HERE/scripts/gen-constants.sh" "$PREFIX"
+
+echo "==> generating manifest"
+bash "$HERE/scripts/gen-manifest.sh" "$PREFIX" "$VARIANT" "$PLATFORM" \
+  "$IREE_SRC" "$IREE_VERSION" "$COMPILER_VERSION"
