@@ -11,8 +11,17 @@ relocatability_repair() { # <prefix>
 
   # Rewrite the leaked absolute prefix to CMake's relocatable variable.
   if [ -d "$prefix/lib/cmake" ]; then
-    grep -rl "$abs" "$prefix/lib/cmake" 2>/dev/null | while IFS= read -r f; do
-      sed -i "s|${abs}|\${PACKAGE_PREFIX_DIR}|g" "$f"
+    # $abs is a literal filesystem path, not a pattern -- it may contain
+    # regex metacharacters (a "." in a version-numbered directory, etc.),
+    # so it must not be used unescaped as a grep pattern or a sed LHS (a "|"
+    # in the path would also break the sed delimiter outright). Match it
+    # with `grep -F` (fixed string, no regex) and escape it for sed's BRE
+    # pattern side (., *, ^, $, [, \), then use a delimiter (SOH, \x01) that
+    # cannot appear in a filesystem path so nothing in $abs needs escaping
+    # for the delimiter itself.
+    abs_sed_escaped="$(printf '%s' "$abs" | sed -e 's/[.*^$[\]/\\&/g')"
+    grep -rlF -- "$abs" "$prefix/lib/cmake" 2>/dev/null | while IFS= read -r f; do
+      sed -i $'s\x01'"${abs_sed_escaped}"$'\x01${PACKAGE_PREFIX_DIR}\x01g' "$f"
     done || true
 
     # Absolute system library paths break consumers on Debian/Ubuntu multiarch,

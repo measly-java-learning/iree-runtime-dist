@@ -135,4 +135,32 @@ else echo "FAIL: second repair pass changed output" >&2; ASSERT_FAILS=$((ASSERT_
 
 rm -rf "$flatcc_tmp"
 
+# --- Metacharacter-path repair (Finding A regression) -----------------------
+# $abs (the prefix's own absolute path) was previously used unescaped both as
+# a grep pattern and as a sed s/// LHS with "|" as delimiter. A prefix path
+# containing regex metacharacters (".") over-matches; one containing "|"
+# breaks the sed delimiter outright. Use a fresh, hermetic, single-file
+# prefix whose path contains both, named literally so the on-disk directory
+# is the thing under test (not a symlink or a synthetic string).
+meta_tmp="$(mktemp -d "/tmp/relocatability-test-pre.fix-v1.0|part.XXXXXX")"
+mkdir -p "$meta_tmp/lib/cmake/IREE"
+meta_abs="$(cd "$meta_tmp" && pwd)"
+cat > "$meta_tmp/lib/cmake/IREE/IREETargets-Runtime.cmake" <<EOF
+set_target_properties(iree_base_base PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES "$meta_abs/include"
+)
+EOF
+
+relocatability_repair "$meta_tmp"
+got_meta="$(cat "$meta_tmp/lib/cmake/IREE/IREETargets-Runtime.cmake")"
+
+assert_contains "$got_meta" '${PACKAGE_PREFIX_DIR}/include' "metacharacter-path prefix rewritten correctly"
+case "$got_meta" in
+  *"$meta_abs"*)
+    echo "FAIL: metacharacter path leak survived repair" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)) ;;
+  *) echo "ok: metacharacter path fully rewritten, no leak survives" ;;
+esac
+
+rm -rf "$meta_tmp"
+
 exit "$ASSERT_FAILS"
