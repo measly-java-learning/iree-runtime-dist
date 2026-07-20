@@ -15,7 +15,7 @@
 - **IREE source version:** stable tag `v3.11.0` (commit `e4a3b0405d7d23554da26403658d0e8c3c5ecf25`). Never `main`.
 - **Paired compiler:** pip `iree-base-compiler==3.11.0` (stable). Never built from source, never shipped.
 - **Compiler is out of contract:** always configure with `-DIREE_BUILD_COMPILER=OFF`.
-- **Build container:** `quay.io/pypa/manylinux_2_28_x86_64`. clang/lld 21.1.8 installed into it. CPython 3.12 (`/opt/python/cp312-cp312/bin`).
+- **Build container:** `quay.io/pypa/manylinux_2_28_x86_64:2026.06.04-1` (dated tag, never `latest`). clang/lld 21.1.8 installed into it. CPython 3.12 (`/opt/python/cp312-cp312/bin`). Task 9b built a thin local specialization, `iree-runtime-dist-build:manylinux_2_28` (see `docker/Dockerfile`, built via `scripts/build-image.sh`), with clang/lld/ninja preinstalled so local invocations stop paying a `dnf install` tax (~50s/run). Local docs use that image; CI still uses the base image with inline `dnf install` until Task 13 decides how (or whether) to make the prebuilt image available to a GitHub Actions runner — see that task's notes.
 - **v1 matrix:** variant `default`, platform `linux-x86_64`. One tarball.
 - **Static only:** `BUILD_SHARED_LIBS=OFF`, `CMAKE_BUILD_TYPE=Release`, PIC on.
 - **Recipe never clones IREE.** The caller always supplies `--iree-src`.
@@ -678,7 +678,7 @@ echo "==> phase 1 complete"
 
 ```bash
 docker run --rm -v "$PWD":/work -v /home/corey/workspace/iree:/iree \
-  -w /work quay.io/pypa/manylinux_2_28_x86_64 \
+  -w /work iree-runtime-dist-build:manylinux_2_28 \
   bash -lc 'export PATH=/opt/python/cp312-cp312/bin:$PATH; \
     ./build-runtime.sh --variant default --prefix /work/out --iree-src /iree'
 bash test/build_smoke.sh out
@@ -686,7 +686,13 @@ bash test/build_smoke.sh out
 
 Expected: `ok:` for every check, exit 0.
 
-If the container lacks clang 21.1.8, install it first (`dnf install -y clang lld` or a pinned tarball) and record what was needed — Task 13 bakes it into CI.
+(Historical note, Task 4: at the time this step was first run, the plain
+`quay.io/pypa/manylinux_2_28_x86_64` base lacked clang, so it was installed
+inline with `dnf install -y clang lld ninja-build patchelf` and the resolved
+versions were recorded — clang/lld 21.1.8, ninja-build 1.8.2. Task 9b baked
+that install into `docker/Dockerfile` as `iree-runtime-dist-build:manylinux_2_28`
+so local invocations, including this one, no longer pay that cost per run;
+build it once with `scripts/build-image.sh`.)
 
 - [ ] **Step 5: Commit**
 
@@ -1897,7 +1903,7 @@ The clean container is the point — do not run this on the build host.
 
 ```bash
 docker run --rm -v "$PWD":/work:ro -v "$PWD/out":/prefix:ro \
-  -w /tmp quay.io/pypa/manylinux_2_28_x86_64 \
+  -w /tmp iree-runtime-dist-build:manylinux_2_28 \
   bash -lc 'export PATH=/opt/python/cp312-cp312/bin:$PATH; \
     cp -r /work/test /tmp/test && cp -r /prefix /tmp/prefix && \
     bash /tmp/test/consumer/run.sh /tmp/prefix'
@@ -2175,16 +2181,39 @@ jobs:
         run: git submodule update --init --depth 1 ${{ needs.setup.outputs.submodules }}
 
       - name: Build in manylinux
+        # NOTE (Task 9b): a GitHub Actions runner cannot see the
+        # locally-built `iree-runtime-dist-build:manylinux_2_28` image from
+        # docker/Dockerfile -- it only exists on whatever machine ran
+        # scripts/build-image.sh. This step therefore still uses the bare,
+        # dated base image with an inline `dnf install`, same as before
+        # Task 9b. Task 13 (not yet implemented) is where the CI story for
+        # the prebuilt image gets decided -- e.g. `docker build` from
+        # docker/Dockerfile with GitHub Actions' layer cache, or publishing
+        # the image to GHCR from a separate workflow and pulling it here.
+        # Do not assume either exists yet; this job as written is honest
+        # about paying the dnf tax in CI for now. patchelf is intentionally
+        # NOT installed -- see docker/Dockerfile's comment: the base image's
+        # preinstalled /usr/local/bin/patchelf (0.17.2) already shadows it.
+        # Package NEVRAs are pinned to match docker/Dockerfile, for the same
+        # reproducibility reason -- but note the tradeoff: if the AlmaLinux/
+        # EPEL mirrors ever retire these exact builds, this step starts
+        # failing loudly (dnf can't resolve the NEVRA) rather than silently
+        # drifting to a newer default. That's an acceptable failure mode for
+        # CI (visible, not silent) but means these three lines need updating
+        # in lockstep with docker/Dockerfile's RUN line if the pin is bumped.
         run: |
           docker run --rm \
             -v "${PWD}/dist":/work -v "${PWD}/iree":/iree \
             -e COMPILER_VERSION="${{ needs.setup.outputs.compiler_version }}" \
             -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-            -w /work quay.io/pypa/manylinux_2_28_x86_64 \
+            -w /work quay.io/pypa/manylinux_2_28_x86_64:2026.06.04-1 \
             bash -lc '
               set -euo pipefail
               export PATH=/opt/python/cp312-cp312/bin:$PATH
-              dnf install -y clang lld ninja-build patchelf >/dev/null
+              dnf install -y \
+                clang-21.1.8-1.module_el8.10.0+4172+b6b13d75 \
+                lld-21.1.8-1.module_el8.10.0+4172+b6b13d75 \
+                ninja-build-1.8.2-1.el8 >/dev/null
               ./build-runtime.sh --variant ${{ matrix.variant }} \
                 --prefix /work/out --iree-src /iree
               chown -R "$HOST_UID:$HOST_GID" /work/out
@@ -2240,13 +2269,20 @@ jobs:
           mkdir -p extracted
           tar -xzf assets/*.tar.gz -C extracted
           prefix="$(find extracted -maxdepth 1 -mindepth 1 -type d)"
+          # Same Task 9b caveat as the build job above: the runner cannot see
+          # a locally-built image, so this still uses the dated base image
+          # with an inline, NEVRA-pinned dnf install rather than
+          # iree-runtime-dist-build:manylinux_2_28.
           docker run --rm \
             -v "${PWD}/test":/test:ro -v "${PWD}/${prefix}":/prefix:ro \
-            -w /tmp quay.io/pypa/manylinux_2_28_x86_64 \
+            -w /tmp quay.io/pypa/manylinux_2_28_x86_64:2026.06.04-1 \
             bash -lc '
               set -euo pipefail
               export PATH=/opt/python/cp312-cp312/bin:$PATH
-              dnf install -y clang lld ninja-build >/dev/null
+              dnf install -y \
+                clang-21.1.8-1.module_el8.10.0+4172+b6b13d75 \
+                lld-21.1.8-1.module_el8.10.0+4172+b6b13d75 \
+                ninja-build-1.8.2-1.el8 >/dev/null
               cp -r /test /tmp/t && cp -r /prefix /tmp/p
               bash /tmp/t/consumer/run.sh /tmp/p
             '
@@ -2430,10 +2466,13 @@ git clone --filter=blob:none --depth 1 --branch v3.11.0 \
   https://github.com/iree-org/iree.git /path/to/iree
 git -C /path/to/iree submodule update --init --depth 1 third_party/flatcc
 
+bash scripts/build-image.sh   # once; builds iree-runtime-dist-build:manylinux_2_28
+                               # and prints the resolved clang/lld/ninja/patchelf versions
+
 docker run --rm -v "$PWD":/work -v /path/to/iree:/iree \
-  -w /work quay.io/pypa/manylinux_2_28_x86_64 \
+  -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+  -w /work iree-runtime-dist-build:manylinux_2_28 \
   bash -lc 'export PATH=/opt/python/cp312-cp312/bin:$PATH; \
-    dnf install -y clang lld ninja-build patchelf; \
     ./build-runtime.sh --variant default --prefix /work/out --iree-src /iree'
 ```
 
