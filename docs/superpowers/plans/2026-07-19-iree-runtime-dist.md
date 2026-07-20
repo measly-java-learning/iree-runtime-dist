@@ -1242,8 +1242,18 @@ The wishlist assumed LLVM notices were needed. With `IREE_BUILD_COMPILER=OFF`, L
 - Test: `test/notices.test.sh`
 
 **Interfaces:**
-- Consumes: a built prefix (Task 4), `IREE_REQUIRED_SUBMODULES` (Task 1).
-- Produces: `<prefix>/LICENSE` and `<prefix>/THIRD-PARTY-NOTICES/<component>/LICENSE`.
+- Consumes: a built prefix (Task 4).
+- Produces: `<prefix>/LICENSE` and `<prefix>/THIRD-PARTY-NOTICES/<component>/LICENSE`. Also `scripts/lib/linked-components.sh` defining `IREE_LINKED_COMPONENTS`.
+
+**IMPORTANT — do not use `IREE_REQUIRED_SUBMODULES` as the notices input.** Task 1
+established empirically that it is a *checkout gate*: IREE's
+`check_submodule_init.py --runtime_only` demands all 11 paths in
+`runtime_submodules.txt` be initialized regardless of what the build actually uses.
+Most of them (`tracy`, `spirv_cross`, `vulkan_headers`, `webgpu-headers`,
+`hip-build-deps`, `hsa-runtime-headers`, `benchmark`, `googletest`) are **not linked**
+into a local-sync/local-task CPU runtime. Generating a notice for each would over-claim
+what the artifact contains — the exact error the design forbids for LLVM. Notices must
+be derived from what is actually linked, which is a separate, smaller list.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1268,11 +1278,16 @@ else echo "FAIL: THIRD-PARTY-NOTICES missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+
 if [ -s "$prefix/THIRD-PARTY-NOTICES/flatcc/LICENSE" ]; then echo "ok: flatcc notice shipped"
 else echo "FAIL: flatcc notice missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 
-# LLVM is never linked (IREE_BUILD_COMPILER=OFF); shipping its notice over-claims.
-if [ -e "$prefix/THIRD-PARTY-NOTICES/llvm-project" ]; then
-  echo "FAIL: llvm-project notice must not ship -- LLVM is not linked" >&2
-  ASSERT_FAILS=$((ASSERT_FAILS+1))
-else echo "ok: no LLVM notice (correctly not claimed)"; fi
+# Nothing unlinked may be claimed. llvm-project is excluded by IREE_BUILD_COMPILER=OFF.
+# The rest are submodules IREE's checkout gate demands but that a local-sync/local-task
+# CPU runtime never links -- claiming them would misrepresent the artifact's contents.
+for unlinked in llvm-project tracy spirv_cross vulkan_headers webgpu-headers \
+                hip-build-deps hsa-runtime-headers benchmark googletest; do
+  if [ -e "$prefix/THIRD-PARTY-NOTICES/$unlinked" ]; then
+    echo "FAIL: $unlinked notice must not ship -- it is not linked into this artifact" >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+  else echo "ok: no $unlinked notice (correctly not claimed)"; fi
+done
 
 # Every notice directory must correspond to something actually shipped.
 for d in "$prefix"/THIRD-PARTY-NOTICES/*/; do
@@ -1289,7 +1304,62 @@ exit "$ASSERT_FAILS"
 Run: `bash test/notices.test.sh out`
 Expected: FAIL — LICENSE and THIRD-PARTY-NOTICES missing.
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 3: Determine what is actually linked (the experiment)**
+
+Do not assume. Inspect the built archives and find which third-party components
+contributed object files:
+
+```bash
+for a in out/lib/*.a; do
+  echo "== $(basename "$a")"
+  ar t "$a" 2>/dev/null | head -5
+done | head -60
+```
+
+Then check specifically for each candidate. flatcc is the known one:
+
+```bash
+nm -o out/lib/*.a 2>/dev/null | grep -c "flatcc" || true
+nm -o out/lib/*.a 2>/dev/null | grep -ciE "tracy|spirv|vulkan|webgpu|hsa_|benchmark|gtest" || true
+```
+
+Also check for components vendored in-tree rather than as submodules — IREE bundles
+some sources directly (e.g. `cpuinfo`, `libbacktrace`) that are linked and therefore
+DO need notices even though they are not submodules:
+
+```bash
+ls out/lib/*.a | sed 's|.*/lib||; s|\.a$||'
+grep -rn "third_party" out/lib/cmake/IREE/IREETargets-Runtime.cmake | head
+```
+
+Record the components with a nonzero linked footprint. That list — not the submodule
+list — is what Step 4 hard-codes. A component vendored in-tree still needs its license
+located under `$IREE_SRC/third_party/<name>/` or wherever IREE keeps it.
+
+- [ ] **Step 4: Write the linked-components list**
+
+`scripts/lib/linked-components.sh` — substitute the list you determined in Step 3:
+
+```bash
+#!/usr/bin/env bash
+# Third-party components ACTUALLY LINKED into the shipped artifact. Source me.
+#
+# Deliberately NOT IREE_REQUIRED_SUBMODULES. That list is a checkout gate: IREE's
+# check_submodule_init.py --runtime_only demands all 11 paths in
+# runtime_submodules.txt be initialized regardless of what the build uses. Most are
+# never linked into a local-sync/local-task CPU runtime, and shipping a license
+# notice for an unlinked component misrepresents what the artifact contains --
+# the same error as claiming LLVM, which IREE_BUILD_COMPILER=OFF excludes entirely.
+#
+# Determined empirically by inspecting the built archives (see Task 8 Step 3).
+# When the driver/loader set changes, re-run that inspection -- this list is not
+# derivable from the build flags alone.
+IREE_LINKED_COMPONENTS="flatcc"
+
+linked_components() { printf '%s' "$IREE_LINKED_COMPONENTS"; }
+```
+
+- [ ] **Step 5: Write the implementation**
 
 `scripts/gen-notices.sh`:
 
@@ -1303,7 +1373,7 @@ Expected: FAIL — LICENSE and THIRD-PARTY-NOTICES missing.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-. "$HERE/lib/submodules.sh"
+. "$HERE/lib/linked-components.sh"
 
 PREFIX="${1:?usage: gen-notices.sh <prefix> <iree-src>}"
 IREE_SRC="${2:?iree-src required}"
@@ -1315,10 +1385,10 @@ NOTICES="$PREFIX/THIRD-PARTY-NOTICES"
 rm -rf "$NOTICES"
 mkdir -p "$NOTICES"
 
-# One notice per submodule the runtime build actually required. Because that set
-# is the empirically-determined build input, this cannot silently over- or
-# under-claim: adding a submodule to the build adds its notice here.
-for sm in $IREE_REQUIRED_SUBMODULES; do
+# One notice per component actually LINKED into the artifact -- deliberately not
+# IREE_REQUIRED_SUBMODULES, which is a checkout gate demanding paths this build
+# never links (see scripts/lib/linked-components.sh).
+for sm in $IREE_LINKED_COMPONENTS; do
   name="$(basename "$sm")"
   found=""
   for cand in LICENSE LICENSE.txt LICENSE.md COPYING NOTICE; do
@@ -1337,7 +1407,7 @@ done
 echo "==> collected $(find "$NOTICES" -name LICENSE | wc -l) third-party notice(s)"
 ```
 
-- [ ] **Step 4: Wire into the build**
+- [ ] **Step 6: Wire into the build**
 
 Append to Phase 3 in `build-runtime.sh`:
 
@@ -1346,15 +1416,16 @@ echo "==> collecting license notices"
 bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC"
 ```
 
-- [ ] **Step 5: Verify**
+- [ ] **Step 7: Verify**
 
 Run the Docker build, then: `bash test/notices.test.sh out`
-Expected: `ok: flatcc notice shipped`, `ok: no LLVM notice (correctly not claimed)`, exit 0.
+Expected: `ok: flatcc notice shipped` plus an `ok: no <name> notice` line for every
+unlinked component, exit 0.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add scripts/gen-notices.sh test/notices.test.sh build-runtime.sh
+git add scripts/lib/linked-components.sh scripts/gen-notices.sh test/notices.test.sh build-runtime.sh
 git commit -m "feat: third-party notices scoped to the actual link surface"
 ```
 
