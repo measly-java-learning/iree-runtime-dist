@@ -191,6 +191,34 @@ next release proves out, so no downstream lands in a half-and-half state.
   own e2e gate consumes the same variable — dogfooding the discovery path exactly as the consumer
   would. If the gate lands on pure B, no file and no variable ship; nothing vestigial.
 
+### 4.6 Consumer TSan runbook (shipped deliverable)
+
+Getting TSan to *run* against this artifact took real investigation (the ASLR/`mmap_rnd_bits`
+finding in §2, plus the linking/flag details). The consumer must not have to relearn it. Because
+the consumer owns the same pinned toolchain (same clang/lld/manylinux — a fair assumption, one
+owner), the exact procedure transfers verbatim; this is a documentation deliverable, not a
+"your mileage may vary" note.
+
+Ship `share/iree-runtime-dist/TSAN.md` **with the tsan variant** (so it is versioned with the
+artifact and cannot drift from the pin), containing the reproduced, minimal recipe:
+
+- **Build/link:** nothing to do — linking `iree-runtime-dist::runtime` from the `tsan` variant
+  applies `-fsanitize=thread` to the whole program via the INTERFACE flag (§4.2). State this so the
+  consumer does not redundantly add or, worse, mismatch the flag.
+- **Run environment:** the exact ASLR workaround the §7 spike selects (candidate: `sudo sysctl -w
+  vm.mmap_rnd_bits=28` on the CI runner host *before* the containerized test, since the setting is
+  host-level and not namespaced), with the measured symptom it prevents (`unexpected memory
+  mapping`, intermittent). This is the single most expensive lesson to rediscover.
+- **Suppressions, if shipped:** wire `IREE_RUNTIME_DIST_TSAN_SUPPRESSIONS` (§4.5) into
+  `TSAN_OPTIONS=suppressions=...`; note its *absence* means none are needed.
+- **What the gate proves and where its edge is:** that our CI runs exactly this recipe and asserts
+  zero reports over `local-task`, so the consumer inherits a known-good procedure rather than a
+  claim.
+
+The doc is generated/copied by the recipe for the tsan variant only (alongside `tsan.supp` if
+present), and `manifest.json`'s `notes` references it. The djl-iree-engine handover
+(`docs/handover/`) links to it rather than restating it, so there is one authoritative copy.
+
 ## 5. Testing strategy
 
 **Hermetic (`test/*.test.sh`, via `test/run.sh`, no build):**
@@ -207,6 +235,9 @@ next release proves out, so no downstream lands in a half-and-half state.
 - `default`: unchanged gate.
 - `tsan`: build under the INTERFACE flag, run `add.vmfb` under `local-task` with TSan, assert zero
   reports + correct result. Consumes `IREE_RUNTIME_DIST_TSAN_SUPPRESSIONS` if defined.
+
+**Structural (tsan prefix):** `share/iree-runtime-dist/TSAN.md` ships (§4.6), and `manifest.json`'s
+`notes` references it — a `default` prefix ships neither.
 
 **Invariants that must keep passing per variant:** relocatability repair+assert over the tsan
 prefix (DWARF from `-g` is scrubbed by the existing `-ffile-prefix-map`); the structural
@@ -229,6 +260,7 @@ tsan tarball.
 | #10 §5 | opt-in fetch, only chosen variant | §4.4 |
 | #3 | pin variable naming won't scale | §4.4 replaces it |
 | (new) | CMake discovery path for suppressions | §4.5 |
+| (new) | Shipped TSan build/run runbook so consumers don't relearn it | §4.6, §7 |
 
 ## 7. Blocking spike (Step 0 of the plan)
 
@@ -263,7 +295,9 @@ too, with the container itself unprivileged. This is the documented remedy for t
 **Exit criteria:** a documented, reproduced answer on a real GitHub-hosted runner — either
 "host-sysctl drives failures to 0 over N≥100 runs, gate is B/C as designed" or a named fallback
 with its trade-off accepted. The plan's remaining tasks assume whichever mechanism the spike
-selects.
+selects. **The selected mechanism is captured verbatim into the shipped `TSAN.md` runbook (§4.6)**
+— closing the spike produces that documentation, so the consumer inherits the recipe rather than
+rediscovering it.
 
 ## 8. Non-goals restated
 
