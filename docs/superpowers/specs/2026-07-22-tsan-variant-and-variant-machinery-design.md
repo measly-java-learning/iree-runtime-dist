@@ -28,10 +28,17 @@ edges. Adding a second (and soon third) variant also forces the packaging/select
 
 ## 2. Grounding findings
 
-- **TSan builds and runs in the current image with no new packages.** A `-fsanitize=thread`
-  program compiles, links, runs, and correctly reports a race inside
-  `iree-runtime-dist-build:linux-x86_64` (clang 21.1.8, glibc 2.28). So the `tsan` variant is a
-  new flag set + a real gate, not toolchain work.
+- **TSan builds and links in the current image with no new packages.** A `-fsanitize=thread`
+  program compiles and links inside `iree-runtime-dist-build:linux-x86_64` (clang 21.1.8, glibc
+  2.28). So the `tsan` variant is a new flag set, not toolchain work.
+- **But TSan does not reliably *run* under CI's ASLR settings — this is a blocking unknown, see
+  §8.** On a host with `vm.mmap_rnd_bits=32` (full ASLR, `randomize_va_space=2`), a
+  `-fsanitize=thread` binary run in an unprivileged container failed with
+  `ThreadSanitizer: unexpected memory mapping` on **39 of 60 runs** (~65%); only 15 completed. The
+  failure is probabilistic — a single trial can succeed and mislead — so it must be measured over
+  many runs. GitHub-hosted Ubuntu 24.04 runners ship this high entropy, and a container cannot be
+  granted the privileges to lower ASLR itself. The gate in §4.3 is contingent on the §8 spike
+  closing.
 - **The variant plumbing is already single-sourced.** `scripts/lib/variants.sh`
   (`variant_flags`, `known_variants`) → `scripts/lib/cmakeflags.sh`
   (`common_flags`, `effective_cmake_flags`, deduped by flag name with the variant winning). The
@@ -101,6 +108,10 @@ frames without a second mechanism.
   interface flag differs. No hand-listed archives, no `--start-group`, unchanged.
 
 ### 4.3 The TSan acceptance gate
+
+**Contingent on the §7 spike closing** — if TSan cannot be made to run reliably in CI, the gate
+mechanism below changes (§7 enumerates the fallbacks). The variant itself still ships regardless;
+what the spike decides is how *we* prove it.
 
 The `verify` job stays a matrix over variants; the consumer e2e (`test/consumer/`) adapts based on
 the variant's recorded `sanitizer` mode — which is exactly what a real consumer running a TSan
@@ -219,7 +230,42 @@ tsan tarball.
 | #3 | pin variable naming won't scale | §4.4 replaces it |
 | (new) | CMake discovery path for suppressions | §4.5 |
 
-## 7. Non-goals restated
+## 7. Blocking spike (Step 0 of the plan)
+
+**Question:** can the TSan acceptance gate (§4.3) actually run in CI — an unprivileged container
+on a GitHub-hosted runner whose kernel has `vm.mmap_rnd_bits=32`?
+
+**Why it is Step 0:** the measured ~65% `unexpected memory mapping` failure rate makes a naive
+in-container TSan run a flaky gate, which is worse than none. Every other task in the plan (the
+variant, the pin selector, BUILDINFO) is wasted effort against `tsan` specifically if we cannot
+gate it, so this resolves first. It is scoped to a throwaway probe (the toy race binary already
+used for grounding, plus a minimal workflow on a branch), not the real recipe.
+
+**Candidate fix, to prove or refute:** `vm.mmap_rnd_bits` is a **host** kernel setting, not
+namespaced, and GitHub-hosted runners grant passwordless `sudo` on the host. So a workflow step
+`sudo sysctl -w vm.mmap_rnd_bits=28` **before** `docker run` should lower entropy for the container
+too, with the container itself unprivileged. This is the documented remedy for the same Ubuntu
+24.04 sanitizer breakage. Prove it drives the failure rate to 0 over many runs on a real runner.
+
+**Fallbacks if the host-sysctl path fails, in preference order:**
+1. `setarch -R` (or `personality(ADDR_NO_RANDOMIZE)`) inside the container — works only if the
+   runner's default Docker seccomp permits it; the consumer's report suggests their policy does
+   not, so verify on the actual runner.
+2. Run the gate on the bare runner (which has `sudo`) rather than in the container — cost: the
+   consumer build no longer uses the pinned container clang, weakening the "clean container"
+   property; acceptable only if 0 and the host-sysctl path both fail.
+3. If TSan genuinely cannot be gated in CI: still ship the `tsan` variant (it is what the consumer
+   needs on *their* infrastructure), but record honestly that our CI proves build+load+correct
+   result only, and that the TSan-clean claim is the consumer's to make in their environment.
+   This is the one case where §4.3's gate degrades — and it degrades to a *documented limitation*,
+   never to a silent build-only gate dressed up as a race gate.
+
+**Exit criteria:** a documented, reproduced answer on a real GitHub-hosted runner — either
+"host-sysctl drives failures to 0 over N≥100 runs, gate is B/C as designed" or a named fallback
+with its trade-off accepted. The plan's remaining tasks assume whichever mechanism the spike
+selects.
+
+## 8. Non-goals restated
 
 No `asan`. No `tracy` (fast follow). No change to the `default` variant's contract, the compiler
 exclusion, the glibc-floor semantics, or the relocatability assertion. No new packages in the
