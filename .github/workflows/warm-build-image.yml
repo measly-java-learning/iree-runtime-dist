@@ -1,0 +1,67 @@
+name: warm-build-image
+
+# Populate the GitHub Actions layer cache for the per-platform toolchain image
+# on the DEFAULT branch. GHA scopes caches per ref and lets a run read only its
+# own ref plus the default branch, so tag (release) runs -- each on a distinct
+# tag ref -- can never read a cache another tag wrote. Warming here on `main` is
+# the one scope every tag run CAN read, so the ~2 min image rebuild + ~768 MB
+# re-upload per release becomes a cache hit instead. See issue #1.
+on:
+  push:
+    branches: [main]
+    # Only re-warm when the image or how it is named/selected actually changes.
+    # A warm on unrelated commits would just re-push identical layers.
+    paths:
+      - 'docker/**'
+      - 'scripts/lib/naming.sh'
+      - '.github/workflows/warm-build-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  platforms:
+    # Single source of truth for the platform list, same as release.yml's setup
+    # job -- so a platform added to scripts/lib/naming.sh warms without a second
+    # edit here.
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.p.outputs.list }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: p
+        run: |
+          . scripts/lib/naming.sh
+          echo "list=$(platforms_json)" >> "$GITHUB_OUTPUT"
+
+  warm:
+    needs: platforms
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: ${{ fromJson(needs.platforms.outputs.list) }}
+    steps:
+      - uses: actions/checkout@v7
+      # Root checkout (no dist/), so tag/Dockerfile are unprefixed -- identical
+      # resolution to release.yml's verify job.
+      - name: Resolve build image identity
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          . scripts/lib/naming.sh
+          {
+            echo "BUILD_IMAGE=$(build_image_tag "$PLATFORM")"
+            echo "BUILD_DOCKERFILE=$(build_dockerfile "$PLATFORM")"
+          } >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v4.2.0
+      - name: Warm the pinned toolchain image cache
+        uses: docker/build-push-action@v7.3.0
+        # No `load:` -- this job only populates the cache; it never runs the
+        # image. cache-to writes the layers the release runs read via cache-from.
+        with:
+          context: docker
+          file: ${{ env.BUILD_DOCKERFILE }}
+          tags: ${{ env.BUILD_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

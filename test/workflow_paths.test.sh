@@ -12,10 +12,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 WF="${1:-$REPO/.github/workflows/release.yml}"
 
-python3 - "$WF" "$REPO" <<'PY'
-import sys, os, yaml
+# The build-image Dockerfile path is no longer a literal `with: file:` -- it is
+# computed per-platform into $GITHUB_ENV (BUILD_DOCKERFILE) and passed as
+# ${{ env.BUILD_DOCKERFILE }}, which the action-path check below skips. The
+# platform list is the same single source of truth the workflow uses.
+PLATFORMS="$(. "$REPO/scripts/lib/naming.sh"; known_platforms | tr '\n' ' ')"
 
-wf_path, repo = sys.argv[1], sys.argv[2]
+python3 - "$WF" "$REPO" "$PLATFORMS" <<'PY'
+import sys, os, re, yaml
+
+wf_path, repo, platforms = sys.argv[1], sys.argv[2], sys.argv[3].split()
 with open(wf_path) as f:
     wf = yaml.safe_load(f)
 
@@ -42,6 +48,35 @@ for job_name, job in wf.get("jobs", {}).items():
             continue  # a foreign repo, not the source of our paths
         roots.append(with_.get("path", ""))
     root = roots[0] if roots else ""
+
+    # BUILD_DOCKERFILE is computed in a run step as
+    #   echo "BUILD_DOCKERFILE=<prefix>$(build_dockerfile "$PLATFORM")"
+    # and later consumed as ${{ env.BUILD_DOCKERFILE }} by build-push-action,
+    # which resolves it against the workspace root exactly like `context`. So
+    # its literal <prefix> must equal this job's checkout root, and the file it
+    # names must exist for every known platform. This is the same wrong-root
+    # bug class as `context`, just one indirection removed.
+    for step in job.get("steps", []):
+        run = step.get("run", "")
+        m = re.search(r'BUILD_DOCKERFILE=([^\n"]*)\$\(build_dockerfile', run)
+        if not m:
+            continue
+        prefix = m.group(1).rstrip("/")   # "" or "dist"
+        if prefix != root:
+            failures.append(
+                f"{job_name}: BUILD_DOCKERFILE prefix {prefix!r} != this job's "
+                f"checkout root {root!r} -- build-push resolves it against the "
+                f"workspace root, so it would point outside the repo"
+            )
+            continue
+        for plat in platforms:
+            rel = os.path.join("docker", f"{plat}.Dockerfile")
+            checked += 1
+            if not os.path.exists(os.path.join(repo, rel)):
+                failures.append(
+                    f"{job_name}: BUILD_DOCKERFILE for {plat} resolves to "
+                    f"{rel!r}, which does not exist in the repo"
+                )
 
     for step in job.get("steps", []):
         uses = step.get("uses", "")

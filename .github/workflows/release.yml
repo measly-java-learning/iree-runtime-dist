@@ -6,9 +6,10 @@ on:
 permissions:
   contents: read
 
-env:
-  # This image is upstream manylinux_2_28 container with required clang toolchain
-  BUILD_IMAGE: iree-runtime-dist-build:manylinux_2_28
+# BUILD_IMAGE is no longer a single static tag: the toolchain image is
+# per-platform (see scripts/lib/naming.sh's build_image_tag/build_dockerfile),
+# so each build/verify job resolves its own tag and Dockerfile from the matrix
+# platform into $GITHUB_ENV. A repo-wide env would force one hard-coded arch.
 
 jobs:
   setup:
@@ -80,12 +81,21 @@ jobs:
       # `path: dist` (to leave room for `iree/` alongside it). build-push-action
       # resolves `context`/`file` against the workspace root, and `uses:` steps
       # ignore `working-directory`, so a bare `docker` here is a nonexistent path.
+      - name: Resolve build image identity
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          . dist/scripts/lib/naming.sh
+          {
+            echo "BUILD_IMAGE=$(build_image_tag "$PLATFORM")"
+            echo "BUILD_DOCKERFILE=dist/$(build_dockerfile "$PLATFORM")"
+          } >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v4.2.0
-      - name: Build the pinned manylinux_2_28 image
+      - name: Build the pinned toolchain image
         uses: docker/build-push-action@v7.3.0
         with:
           context: dist/docker
-          file: dist/docker/Dockerfile
+          file: ${{ env.BUILD_DOCKERFILE }}
           tags: ${{ env.BUILD_IMAGE }}
           load: true
           cache-from: type=gha
@@ -161,17 +171,30 @@ jobs:
           mkdir -p extracted
           tar -xzf assets/*.tar.gz -C extracted
 
-      # Same container decision as the build job: rebuild docker/Dockerfile
+      # Same container decision as the build job: rebuild the toolchain image
       # against the GHA layer cache rather than pulling a registry image or
       # duplicating the dnf install pins inline. This is a cache hit in the
       # common case (the build job already populated the cache in this same
       # workflow run), so the toolchain install is not repeated in practice.
+      #
+      # No `dist/` prefix here: this job checks out to the workspace root, so
+      # the Dockerfile path and context are unprefixed. workflow_paths.test.sh
+      # enforces that this prefix matches the job's checkout root.
+      - name: Resolve build image identity
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          . scripts/lib/naming.sh
+          {
+            echo "BUILD_IMAGE=$(build_image_tag "$PLATFORM")"
+            echo "BUILD_DOCKERFILE=$(build_dockerfile "$PLATFORM")"
+          } >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v4.2.0
-      - name: Build the pinned manylinux_2_28 image
+      - name: Build the pinned toolchain image
         uses: docker/build-push-action@v7.3.0
         with:
           context: docker
-          file: docker/Dockerfile
+          file: ${{ env.BUILD_DOCKERFILE }}
           tags: ${{ env.BUILD_IMAGE }}
           load: true
           cache-from: type=gha

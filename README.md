@@ -178,12 +178,13 @@ git -C /path/to/iree submodule update --init --depth 1 \
   third_party/vulkan_headers third_party/webgpu-headers
 ```
 
-Build the pinned toolchain image once (`docker/Dockerfile`, tagged
-`iree-runtime-dist-build:manylinux_2_28`; ~50s saved on every later invocation versus installing
-clang/lld/ninja fresh each time):
+Build the pinned toolchain image once (`docker/linux-x86_64.Dockerfile`, tagged
+`iree-runtime-dist-build:linux-x86_64`; ~50s saved on every later invocation versus installing
+clang/lld/ninja fresh each time). The tag and Dockerfile are named by the platform token, so a
+future arch is just a sibling `docker/<platform>.Dockerfile`:
 
 ```bash
-bash scripts/build-image.sh   # prints the resolved clang/lld/ninja/patchelf versions
+bash scripts/build-image.sh   # builds every known platform; prints resolved tool versions
 ```
 
 Then build:
@@ -191,14 +192,16 @@ Then build:
 ```bash
 docker run --rm -v "$PWD":/work -v /path/to/iree:/iree \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-  -w /work iree-runtime-dist-build:manylinux_2_28 \
+  -w /work iree-runtime-dist-build:linux-x86_64 \
   bash -lc 'export PATH=/opt/python/cp312-cp312/bin:$PATH; \
     ./build-runtime.sh --variant default --prefix /work/out --iree-src /iree'
 ```
 
-This mirrors what `.github/workflows/release.yml`'s `build` job does, except CI builds
-`docker/Dockerfile` itself via `docker/build-push-action` with GitHub Actions layer caching (a
+This mirrors what `.github/workflows/release.yml`'s `build` job does, except CI builds the
+per-platform Dockerfile itself via `docker/build-push-action` with GitHub Actions layer caching (a
 locally built image is invisible to GH runners, so CI can't just `docker run` the local tag).
+Because that cache is ref-scoped, `.github/workflows/warm-build-image.yml` re-warms it on `main`
+whenever the Dockerfile changes, so each tag release reads a cache hit instead of rebuilding.
 
 Inspect the effective cmake flags without building or needing an IREE checkout at all:
 

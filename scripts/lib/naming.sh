@@ -16,6 +16,17 @@ sha_name()     { printf '%s.sha256' "$(tarball_name "$@")"; }
 # output instead.
 PLATFORMS="linux-x86_64"
 known_platforms() { printf '%s\n' $PLATFORMS; }
+
+# Build-image identity, keyed off the platform token above. The prebuilt
+# toolchain container is per-platform (a manylinux_2_28 base exists for each
+# arch), so the image tag and its Dockerfile are named by the SAME platform
+# string the artifact is -- one token, no drift. Adding a platform to PLATFORMS
+# plus dropping in docker/<platform>.Dockerfile is the whole change; the local
+# builder (scripts/build-image.sh), release.yml, and warm-build-image.yml all
+# derive tag and Dockerfile path from here rather than hard-coding either.
+BUILD_IMAGE_REPO="iree-runtime-dist-build"
+build_image_tag()  { printf '%s:%s' "$BUILD_IMAGE_REPO" "$1"; }  # <platform>
+build_dockerfile() { printf 'docker/%s.Dockerfile' "$1"; }        # <platform>, repo-relative
 platforms_json() { # JSON array, for GitHub Actions' fromJson() in a matrix
   python3 -c "import json,sys; print(json.dumps(sys.argv[1].split()))" "$PLATFORMS"
 }

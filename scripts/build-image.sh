@@ -9,19 +9,28 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+. "$HERE/lib/naming.sh"
 
-IMAGE_TAG="iree-runtime-dist-build:manylinux_2_28"
+# Build every known platform's image (currently just linux-x86_64). Tag and
+# Dockerfile are derived from naming.sh, so this needs no edit when a platform
+# is added -- only a new docker/<platform>.Dockerfile. An arg selects one.
+platforms="${1:-$(known_platforms)}"
 
-echo "==> building $IMAGE_TAG from docker/Dockerfile"
-docker build -t "$IMAGE_TAG" -f "$ROOT/docker/Dockerfile" "$ROOT/docker"
+for platform in $platforms; do
+  image_tag="$(build_image_tag "$platform")"
+  dockerfile="$ROOT/$(build_dockerfile "$platform")"
 
-echo "==> resolved tool versions in $IMAGE_TAG"
-docker run --rm "$IMAGE_TAG" bash -lc '
-  echo "clang:      $(clang --version | head -1)"
-  echo "lld:        $(ld.lld --version)"
-  echo "ninja:      $(ninja --version)"
-  echo "patchelf:   $(patchelf --version) (from $(command -v patchelf))"
-  echo "glibc:      $(getconf GNU_LIBC_VERSION)"
-'
+  echo "==> building $image_tag from $(build_dockerfile "$platform")"
+  docker build -t "$image_tag" -f "$dockerfile" "$ROOT/docker"
 
-echo "==> $IMAGE_TAG ready"
+  echo "==> resolved tool versions in $image_tag"
+  docker run --rm "$image_tag" bash -lc '
+    echo "clang:      $(clang --version | head -1)"
+    echo "lld:        $(ld.lld --version)"
+    echo "ninja:      $(ninja --version)"
+    echo "patchelf:   $(patchelf --version) (from $(command -v patchelf))"
+    echo "glibc:      $(getconf GNU_LIBC_VERSION)"
+  '
+
+  echo "==> $image_tag ready"
+done

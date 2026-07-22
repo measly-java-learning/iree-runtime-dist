@@ -1,3 +1,9 @@
+# Build container for the `linux-x86_64` platform. The filename encodes the
+# platform token (scripts/lib/naming.sh) so the image tag, its Dockerfile, and
+# the artifact platform stay one name; an aarch64 platform would add a sibling
+# docker/linux-aarch64.Dockerfile (manylinux_2_28_aarch64 base) with no change
+# to how tag/Dockerfile are resolved.
+#
 # Thin local specialization of the manylinux_2_28 build container with the
 # recipe's toolchain (clang/lld/ninja) preinstalled, so every build/verify
 # invocation stops paying a `dnf install` tax.
