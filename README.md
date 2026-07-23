@@ -102,11 +102,11 @@ carried through by rename, not re-derivation):
 ```cmake
 include(IreeRuntimePin.cmake)   # generated per-release by scripts/gen-pin.sh; not published yet
 
+set(IREE_RUNTIME_VARIANT default)   # or "tsan" for the ThreadSanitizer build
+iree_runtime_dist_url("${IREE_RUNTIME_VARIANT}" linux-x86_64 _url _sha)
+
 include(FetchContent)
-FetchContent_Declare(iree_runtime
-  URL      "${IREE_RUNTIME_URL_default_linux-x86_64}"
-  URL_HASH "SHA256=${IREE_RUNTIME_SHA256_default_linux-x86_64}"
-)
+FetchContent_Declare(iree_runtime URL "${_url}" URL_HASH "SHA256=${_sha}")
 FetchContent_MakeAvailable(iree_runtime)
 
 find_package(IreeRuntimeDist REQUIRED
@@ -114,6 +114,14 @@ find_package(IreeRuntimeDist REQUIRED
 
 target_link_libraries(my_jni_lib PRIVATE iree-runtime-dist::runtime)
 ```
+
+`iree_runtime_dist_url` is a fixed helper the pin ships (`scripts/gen-pin.sh`), not a
+string-built variable name — it fails fast with `FATAL_ERROR` on an unbuilt variant/platform
+combo. Only the resolved `variant`/`platform` pair is `FetchContent`ed; every other variant's
+data in the pin is inert `set()` lines that download nothing, so selecting `tsan` never pulls the
+`default` tarball or vice versa. This is a clean break from the pin's old flat
+`IREE_RUNTIME_URL_<variant>_<platform>` / `IREE_RUNTIME_SHA256_<variant>_<platform>` variables —
+those are gone, not kept alongside.
 
 **2. Direct upstream, unmodified**, if you'd rather not take the dist's umbrella target:
 

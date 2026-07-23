@@ -37,11 +37,35 @@ verified: I downloaded the published pin, followed its URL, and its recorded SHA
 2.43 MB tarball byte-for-byte.
 
 ```cmake
-set(IREE_RUNTIME_URL_default_linux-x86_64
-    "https://github.com/measly-java-learning/iree-runtime-dist/releases/download/v3.11.0-3/iree-runtime-3.11.0-default-linux-x86_64.tar.gz")
-set(IREE_RUNTIME_SHA256_default_linux-x86_64
-    "fe23acb93e842586f296889f2d5fd11df71391af87654c06c83acd3b218c4e5e")
+include(IreeRuntimePin.cmake)
+
+set(IREE_RUNTIME_VARIANT default)   # or "tsan" -- see "TSan variant" below
+iree_runtime_dist_url("${IREE_RUNTIME_VARIANT}" linux-x86_64 _url _sha)
+
+include(FetchContent)
+FetchContent_Declare(iree_runtime URL "${_url}" URL_HASH "SHA256=${_sha}")
 ```
+
+**Clean break from what this doc originally showed you.** The pin used to define flat
+`IREE_RUNTIME_URL_default_linux-x86_64` / `IREE_RUNTIME_SHA256_default_linux-x86_64` variables
+directly. Those are gone as of the variant-matrix release — do not grep your build for them.
+`iree_runtime_dist_url(variant, platform, out_url, out_sha)` is the fixed selector now: pass it
+the variant and platform, it sets your two output variables and `FATAL_ERROR`s if that combo was
+never built. Only the variant you resolve gets `FetchContent`ed — the other variant's `set()`
+lines in the pin are inert data, so picking `default` never downloads `tsan` or vice versa.
+
+### TSan variant
+
+A `tsan` variant now ships alongside `default`, built with `-fsanitize=thread`. Select it by
+setting `IREE_RUNTIME_VARIANT=tsan` before calling `iree_runtime_dist_url` above — everything
+else in your `find_package`/`target_link_libraries` stays identical, since the umbrella target
+propagates `-fsanitize=thread` as an `INTERFACE` flag automatically. `manifest.json` and
+`BUILDINFO` record a `sanitizer` field (`thread` for `tsan`, absent for `default`) so you can
+fail fast at configure time if `IREE_DJL_TSAN=ON` but the fetched variant isn't sanitized. Your
+TSan build itself must use clang (`-DCMAKE_C_COMPILER=clang` / `-DCMAKE_CXX_COMPILER=clang++`) to
+match the toolchain this variant was compiled with. The `tsan` prefix ships
+`share/iree-runtime-dist/TSAN.md` with the full recipe (build/link notes, the ASLR/`mmap_rnd_bits`
+workaround, suppressions wiring) — read that rather than re-deriving it here.
 
 ---
 
