@@ -60,6 +60,11 @@ boundary.
   consumer wants to rewrite its codegen against the better shape.
 - Additional serialization formats (TOML, `.properties`). JSON + schema only; the zip is the
   extension point if a second format is ever demanded.
+- **Per-language bindings / reader code.** The producer-side decoder (`enrich-constants.py`) is
+  redundant to consumers once its output is the enriched data, and shipping a reader for one
+  language reopens "why not the others." The **JSON Schema is the neutral codegen enabler**
+  (schema-to-source generators exist per language); the zip can carry an optional, clearly-labeled
+  *reference* reader later if a consumer commits to a specific language and demand is demonstrated.
 
 ## 4. Design
 
