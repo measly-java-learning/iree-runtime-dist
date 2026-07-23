@@ -13,7 +13,6 @@ else echo "FAIL: manifest.json missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); e
 get() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d$2)" "$m"; }
 
 assert_eq "$(get "$m" "['schema_version']")"       "2"        "schema_version"
-assert_eq "$(get "$m" "['variant']")"              "default"  "variant"
 assert_eq "$(get "$m" "['platform']")"             "linux-x86_64" "platform"
 assert_eq "$(get "$m" "['iree_version']")"         "3.11.0"   "iree_version"
 assert_eq "$(get "$m" "['iree_tag']")"             "v3.11.0"  "iree_tag"
@@ -43,6 +42,21 @@ assert_eq "$(get "$m" "['build_config']['IREE_HAL_DRIVER_LOCAL_TASK']")" "ON" "l
 
 if [ -e "$prefix/BUILDINFO" ]; then echo "ok: BUILDINFO present"
 else echo "FAIL: BUILDINFO missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+
+# manifest.json's variant must match the prefix's own BUILDINFO variant= line
+# rather than a hard-coded "default" -- this test runs against both default
+# and tsan prefixes.
+variant="$(grep -oE '^variant=.*' "$prefix/BUILDINFO" | cut -d= -f2)"
+assert_eq "$(get "$m" "['variant']")" "$variant" "variant matches BUILDINFO"
+
+# sanitizer field: absent for default, "thread" for tsan (Task 3).
+san="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sanitizer",""))' "$m")"
+if [ "$variant" = "tsan" ]; then
+  assert_eq "$san" "thread" "tsan manifest records sanitizer=thread"
+  assert_contains "$(cat "$prefix/BUILDINFO")" "sanitizer=thread" "tsan BUILDINFO records sanitizer"
+else
+  assert_eq "$san" "" "default manifest omits sanitizer"
+fi
 
 # glibc_build must look like a real detected version (MAJOR.MINOR) or the
 # explicit "unknown" sentinel -- never a hard-coded/assumed value, and never

@@ -70,6 +70,8 @@ print(json.dumps(cfg, indent=4, sort_keys=True))
 '
 )"
 
+SANITIZER="$(variant_sanitizer "$VARIANT")"
+
 # Pass every value as argv rather than interpolating into the heredoc's Python
 # source directly -- interpolation would let a value containing a quote or
 # backslash (e.g. an unusual IREE_SRC path) break the heredoc's Python syntax or
@@ -77,12 +79,12 @@ print(json.dumps(cfg, indent=4, sort_keys=True))
 # string as far as the Python parser is concerned.
 python3 - "$OUT_DIR/manifest.json" "$VARIANT" "$PLATFORM" "$IREE_VERSION" \
   "$RUNTIME_COMMIT" "$COMPILER_VERSION" "$GLIBC_BUILD" "$BUILD_CONFIG_JSON" \
-  "$VM_BYTECODE_VERSION" <<'EOF'
+  "$VM_BYTECODE_VERSION" "$SANITIZER" <<'EOF'
 import json, sys
 
 (_, out_path, variant, platform, iree_version, runtime_commit,
  compiler_version, glibc_build, build_config_json,
- vm_bytecode_version) = sys.argv
+ vm_bytecode_version, sanitizer) = sys.argv
 
 manifest = {
     "schema_version": 2,
@@ -126,6 +128,15 @@ manifest = {
     },
 }
 
+if sanitizer:
+    manifest["sanitizer"] = sanitizer
+    manifest["notes"]["sanitizer"] = (
+        "This variant is built with -fsanitize=" + sanitizer + ". The umbrella "
+        "target propagates the sanitizer flag as an INTERFACE option, so linking "
+        "it instruments the whole consumer program. See share/iree-runtime-dist/"
+        "TSAN.md for how to run it (ASLR/mmap_rnd_bits) and any suppressions."
+    )
+
 with open(out_path, "w") as f:
     json.dump(manifest, f, indent=2, sort_keys=True)
     f.write("\n")
@@ -142,5 +153,7 @@ vm_bytecode_version=$VM_BYTECODE_VERSION
 glibc_build=$GLIBC_BUILD
 cmake_flags=$(effective_cmake_flags "$VARIANT" | tr '\n' ' ')
 EOF
+
+[ -n "$SANITIZER" ] && echo "sanitizer=$SANITIZER" >> "$PREFIX/BUILDINFO" || true
 
 echo "==> generated manifest.json and BUILDINFO"
