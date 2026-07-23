@@ -13,10 +13,26 @@ PREFIX="$(cd "${1:?usage: run.sh <prefix>}" && pwd)"
 build="$(mktemp -d)"
 trap 'rm -rf "$build"' EXIT
 
+mode="$(consumer_run_mode "$PREFIX")"
+echo "==> consumer run mode: $mode"
+
+# A sanitizer variant is instrumented by clang's compiler-rt; its INTERFACE flag
+# makes the consumer link -fsanitize=thread too. The consumer MUST build with
+# clang so clang's TSan runtime resolves the __tsan_* symbols -- gcc's libtsan is
+# a different, non-interchangeable runtime (and isn't present in the manylinux
+# image). This mirrors exactly what a downstream consumer of the tsan variant
+# must do, and is documented in share/iree-runtime-dist/TSAN.md.
+compiler_args=()
+if [ "$mode" = "tsan" ]; then
+  # consumer.c is a C-only project, so only the C compiler matters here.
+  compiler_args=(-DCMAKE_C_COMPILER=clang)
+fi
+
 echo "==> configuring consumer against $PREFIX"
 cmake -G Ninja -B "$build" -S "$HERE" \
   -DCMAKE_PREFIX_PATH="$PREFIX/lib/cmake/IreeRuntimeDist" \
-  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_BUILD_TYPE=Release \
+  "${compiler_args[@]}"
 
 echo "==> building consumer"
 cmake --build "$build"
@@ -26,9 +42,6 @@ if [ ! -s "$vmfb" ]; then
   echo "FAIL: shipped module not found or empty: $vmfb" >&2
   exit 1
 fi
-
-mode="$(consumer_run_mode "$PREFIX")"
-echo "==> consumer run mode: $mode"
 
 fails=0
 if [ "$mode" = "tsan" ]; then
