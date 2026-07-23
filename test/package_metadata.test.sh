@@ -4,14 +4,15 @@ here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/assert.sh"
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/prefix/share/iree-runtime-dist" "$tmp/out"
+outdir="$(mktemp -d)"; trap 'rm -rf "$tmp" "$outdir"' EXIT
+mkdir -p "$tmp/prefix/share/iree-runtime-dist"
 for f in element_types.json status_codes.json element_types.schema.json status_codes.schema.json; do
   echo '{}' > "$tmp/prefix/share/iree-runtime-dist/$f"
 done
 
-( cd "$tmp" && bash "$here/../scripts/package-metadata.sh" prefix 9.9.9 out )
+bash "$here/../scripts/package-metadata.sh" "$tmp/prefix" 9.9.9 "$outdir"
 
-zip_path="$tmp/out/iree-runtime-metadata-9.9.9.zip"
+zip_path="$outdir/iree-runtime-metadata-9.9.9.zip"
 if [ -s "$zip_path" ]; then echo "ok: zip created"
 else echo "FAIL: zip missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 

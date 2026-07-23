@@ -12,6 +12,7 @@ for f in element_types.json status_codes.json element_types.schema.json status_c
 done
 sed "s|@IREE_VERSION@|${VERSION}|g" "$HERE/../docs/metadata-README.md.in" > "$stage/README.md"
 mkdir -p "$OUTDIR"
-( cd "$stage" && zip -q -X "$OLDPWD/$OUTDIR/iree-runtime-metadata-${VERSION}.zip" \
+OUTDIR="$(cd "$OUTDIR" && pwd)"
+( cd "$stage" && zip -q -X "$OUTDIR/iree-runtime-metadata-${VERSION}.zip" \
     element_types.json status_codes.json element_types.schema.json status_codes.schema.json README.md )
 echo "==> packaged iree-runtime-metadata-${VERSION}.zip"
