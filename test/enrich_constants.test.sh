@@ -8,14 +8,15 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 cat > "$tmp/et.json" <<'EOF'
 { "NONE": 0, "OPAQUE_32": 32, "BOOL_8": 318767112,
   "INT_32": 268435488, "SINT_32": 285212704, "UINT_16": 301989904,
-  "FLOAT_32": 553648160, "BFLOAT_16": 570425360, "COMPLEX_FLOAT_64": 587202624 }
+  "FLOAT_32": 553648160, "BFLOAT_16": 570425360, "FLOAT_8_E4M3FN": 620756992,
+  "BARE_FLOAT_32": 536870944, "COMPLEX_FLOAT_64": 587202624 }
 EOF
 cat > "$tmp/sc.json" <<'EOF'
 { "OK": 0, "INVALID_ARGUMENT": 3 }
 EOF
 cat > "$tmp/nt.json" <<'EOF'
 { "UNKNOWN": 0, "INTEGER": 16, "INTEGER_SIGNED": 17, "INTEGER_UNSIGNED": 18,
-  "BOOLEAN": 19, "FLOAT": 32, "FLOAT_IEEE": 33, "FLOAT_BRAIN": 34, "FLOAT_COMPLEX": 35 }
+  "BOOLEAN": 19, "FLOAT": 32, "FLOAT_IEEE": 33, "FLOAT_BRAIN": 34, "FLOAT_8_E4M3FN": 37, "FLOAT_COMPLEX": 35 }
 EOF
 
 python3 "$here/../scripts/enrich-constants.py" "$tmp/et.json" "$tmp/sc.json" "$tmp/nt.json" "$tmp/out"
@@ -40,6 +41,10 @@ assert_eq "$(get "$e" "['element_types']['INT_32']['signed']")"           "None"
 assert_eq "$(get "$e" "['element_types']['BOOL_8']['category']")"         "boolean"    "BOOL_8 boolean"
 assert_eq "$(get "$e" "['element_types']['OPAQUE_32']['category']")"      "opaque"     "OPAQUE_32 opaque"
 assert_eq "$(get "$e" "['element_types']['COMPLEX_FLOAT_64']['category']")" "complex"  "COMPLEX complex"
+assert_eq "$(get "$e" "['element_types']['FLOAT_8_E4M3FN']['category']")" "float" "FP8 -> float"
+assert_eq "$(get "$e" "['element_types']['FLOAT_8_E4M3FN']['numerical_type']")" "FLOAT_8_E4M3FN" "FP8 numtype"
+assert_eq "$(get "$e" "['element_types']['BARE_FLOAT_32']['category']")" "float" "bare FLOAT -> float"
+assert_eq "$(get "$e" "['element_types']['BFLOAT_16']['category']")" "float" "BFLOAT_16 -> float"
 
 s="$tmp/out/status_codes.json"
 assert_eq "$(get "$s" "['status_codes']['OK']['value']")" "0" "status OK value"
