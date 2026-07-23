@@ -51,8 +51,18 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# -ffile-prefix-map keeps __FILE__ (which IREE embeds in status strings) and DWARF
+# DW_AT_comp_dir relative, so published artifacts carry no build-machine paths.
+PREFIX_MAP="-ffile-prefix-map=${IREE_SRC}=iree"
+# variant_cflags is the injection point for non-cache-var compiler flags (e.g.
+# tsan's -fsanitize=thread -g). Compose once so the build, --print-flags, and any
+# provenance use the identical string.
+VARIANT_CFLAGS="$(variant_cflags "$VARIANT")"
+COMPILER_FLAGS="$PREFIX_MAP${VARIANT_CFLAGS:+ $VARIANT_CFLAGS}"
+
 if [ "$PRINT_FLAGS" -eq 1 ]; then
   effective_cmake_flags "$VARIANT"
+  echo "compiler_flags: $COMPILER_FLAGS"
   exit 0
 fi
 
@@ -135,10 +145,6 @@ done
 
 mapfile -t FLAGS < <(effective_cmake_flags "$VARIANT")
 
-# -ffile-prefix-map keeps __FILE__ (which IREE embeds in status strings) and DWARF
-# DW_AT_comp_dir relative, so published artifacts carry no build-machine paths.
-PREFIX_MAP="-ffile-prefix-map=${IREE_SRC}=iree"
-
 echo "==> configuring"
 cmake -G Ninja -B "$BUILD_DIR" -S "$IREE_SRC" \
   "${FLAGS[@]}" \
@@ -146,8 +152,8 @@ cmake -G Ninja -B "$BUILD_DIR" -S "$IREE_SRC" \
   -DCMAKE_INSTALL_LIBDIR=lib \
   -DCMAKE_C_COMPILER=clang \
   -DCMAKE_CXX_COMPILER=clang++ \
-  -DCMAKE_C_FLAGS="$PREFIX_MAP" \
-  -DCMAKE_CXX_FLAGS="$PREFIX_MAP"
+  -DCMAKE_C_FLAGS="$COMPILER_FLAGS" \
+  -DCMAKE_CXX_FLAGS="$COMPILER_FLAGS"
 
 echo "==> building"
 cmake --build "$BUILD_DIR"
