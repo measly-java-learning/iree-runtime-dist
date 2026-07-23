@@ -31,14 +31,13 @@ edges. Adding a second (and soon third) variant also forces the packaging/select
 - **TSan builds and links in the current image with no new packages.** A `-fsanitize=thread`
   program compiles and links inside `iree-runtime-dist-build:linux-x86_64` (clang 21.1.8, glibc
   2.28). So the `tsan` variant is a new flag set, not toolchain work.
-- **But TSan does not reliably *run* under CI's ASLR settings — this is a blocking unknown, see
-  §8.** On a host with `vm.mmap_rnd_bits=32` (full ASLR, `randomize_va_space=2`), a
-  `-fsanitize=thread` binary run in an unprivileged container failed with
-  `ThreadSanitizer: unexpected memory mapping` on **39 of 60 runs** (~65%); only 15 completed. The
-  failure is probabilistic — a single trial can succeed and mislead — so it must be measured over
-  many runs. GitHub-hosted Ubuntu 24.04 runners ship this high entropy, and a container cannot be
-  granted the privileges to lower ASLR itself. The gate in §4.3 is contingent on the §8 spike
-  closing.
+- **TSan runs cleanly in CI — the §7 spike (CLOSED) confirmed no ASLR workaround is needed.** The
+  `unexpected memory mapping` failures (~65%, 39/60) seen during design were specific to the local
+  dev host, which runs `vm.mmap_rnd_bits=32`. The GitHub-hosted runner measured in the spike
+  (kernel 6.17-azure) already defaults to `mmap_rnd_bits=28`, where TSan ran clean **200/200** with
+  no fix — the earlier assumption that GitHub runners ship 32 was wrong. §4.3's gate keeps an
+  idempotent `sudo sysctl -w vm.mmap_rnd_bits=28` step only as belt-and-suspenders insurance
+  against a future runner-default change. See `docs/superpowers/notes/2026-07-22-tsan-ci-spike.md`.
 - **The variant plumbing is already single-sourced.** `scripts/lib/variants.sh`
   (`variant_flags`, `known_variants`) → `scripts/lib/cmakeflags.sh`
   (`common_flags`, `effective_cmake_flags`, deduped by flag name with the variant winning). The
@@ -115,9 +114,10 @@ supersedes an earlier draft that used `RelWithDebInfo`.)
 
 ### 4.3 The TSan acceptance gate
 
-**Contingent on the §7 spike closing** — if TSan cannot be made to run reliably in CI, the gate
-mechanism below changes (§7 enumerates the fallbacks). The variant itself still ships regardless;
-what the spike decides is how *we* prove it.
+**§7 spike CLOSED (2026-07-23): TSan runs cleanly on GitHub-hosted runners with no workaround**
+(runner default is `mmap_rnd_bits=28`, 200/200 clean). The gate below runs as designed; the verify
+job keeps an idempotent `sudo sysctl -w vm.mmap_rnd_bits=28` step only as insurance against a
+future runner-default change. B-vs-C (suppressions) is still resolved empirically in Task 9.
 
 The `verify` job stays a matrix over variants; the consumer e2e (`test/consumer/`) adapts based on
 the variant's recorded `sanitizer` mode — which is exactly what a real consumer running a TSan
