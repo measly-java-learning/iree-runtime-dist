@@ -182,9 +182,11 @@ next release proves out, so no downstream lands in a half-and-half state.
 ### 4.5 Provenance, fail-fast, and suppressions discovery
 
 - **`sanitizer` field** in `manifest.json` and `BUILDINFO`: `thread` for `tsan`, absent for
-  `default`. It is also implicit in the `cmake_flags` provenance line (which now carries
-  `-fsanitize=thread` for tsan), but is surfaced explicitly so the consumer can fail-fast when
-  `IREE_DJL_TSAN=ON` but the fetched variant is not thread-sanitized (#10 §2).
+  `default`. Note the `cmake_flags`/`build_config` provenance records only the `-D` cache options
+  (`effective_cmake_flags`); `-fsanitize=thread` travels via `variant_cflags` into
+  `CMAKE_C_FLAGS`/`CXX_FLAGS`, which those fields do NOT capture — so this explicit `sanitizer`
+  field is the *only* place instrumentation is recorded, and the thing the consumer reads to
+  fail-fast when `IREE_DJL_TSAN=ON` but the fetched variant is not thread-sanitized (#10 §2).
 - **Suppressions discovery variable.** If and only if a `tsan.supp` ships, the tsan variant's
   `IreeRuntimeDistConfig.cmake` sets:
   ```cmake
