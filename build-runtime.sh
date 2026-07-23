@@ -377,6 +377,13 @@ bash "$HERE/scripts/gen-manifest.sh" "$PREFIX" "$VARIANT" "$PLATFORM" \
 echo "==> collecting license notices"
 bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC" "$BUILD_DIR"
 
+# Sanitizer variants ship a consumer runbook (build with clang, ASLR note,
+# suppressions wiring). A default prefix ships none.
+if [ -n "$(variant_sanitizer "$VARIANT")" ]; then
+  echo "==> shipping sanitizer runbook"
+  bash "$HERE/scripts/gen-tsan-docs.sh" "$PREFIX" "$IREE_VERSION" "$COMPILER_VERSION"
+fi
+
 echo "==> installing dist cmake additions"
 RUNTIME_COMMIT="$(git -C "$IREE_SRC" rev-parse HEAD)"
 mkdir -p "$PREFIX/lib/cmake/IreeRuntimeDist"

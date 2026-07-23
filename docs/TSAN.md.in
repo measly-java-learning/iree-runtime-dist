@@ -1,0 +1,87 @@
+# Using the `tsan` runtime variant
+
+This tarball is the **ThreadSanitizer-instrumented** build of the IREE runtime
+(`iree-runtime-@IREE_VERSION@-tsan-linux-x86_64`). It exists so you can run a
+valid TSan gate over code that drives the runtime's multithreaded `local-task`
+driver. Against the uninstrumented `default` runtime, TSan reports only false
+positives — it cannot see IREE's internal happens-before edges. This variant
+makes them visible, so a full-program TSan build is instrumented end to end.
+
+Everything below is the exact recipe our own acceptance gate uses. Because you
+build against the same pinned toolchain, it transfers verbatim.
+
+## 1. Build your consumer with clang
+
+**You must compile and link your consumer with clang (clang 21.1.x, the same
+compiler this runtime was built with).** The archives are instrumented by
+clang's compiler-rt; linking `iree-runtime-dist::runtime` from this variant adds
+`-fsanitize=thread` to your program via an INTERFACE flag, so:
+
+- Do **not** add `-fsanitize=thread` yourself — the target already does.
+- Do **not** build with gcc. gcc's `libtsan` is a different, non-interchangeable
+  runtime, and linking clang-instrumented archives with it fails
+  (`cannot find -ltsan`). This is the single most common way to get stuck.
+
+```cmake
+# in your consumer's configure step
+-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+```
+
+`find_package(IreeRuntimeDist)` and the `iree-runtime-dist::runtime` target are
+otherwise identical to the `default` variant — only the sanitizer flag differs.
+
+## 2. Run environment: ASLR / `vm.mmap_rnd_bits`
+
+TSan maps shadow memory at addresses that can collide when the kernel's ASLR
+entropy is very high. On a host with `vm.mmap_rnd_bits=32` (some Ubuntu 24.04
+images), a TSan binary fails intermittently with
+`ThreadSanitizer: unexpected memory mapping` — even in an unprivileged container,
+which cannot lower ASLR itself.
+
+- **GitHub-hosted runners already default to `mmap_rnd_bits=28`, where TSan runs
+  cleanly** — no action needed there.
+- If your CI runner (or dev host) is at 32, lower it on the **runner host**
+  before launching your container (the setting is host-level, not namespaced, so
+  the container inherits it). The runner host has `sudo`; the container does not
+  need any privilege:
+
+```bash
+sudo sysctl -w vm.mmap_rnd_bits=28   # on the runner host, before `docker run`
+```
+
+## 3. Suppressions
+
+This release ships **no suppressions file** — IREE's own synchronization is
+TSan-clean once the runtime is instrumented (our gate confirms zero reports over
+`local-task`). You do not need to suppress anything in IREE.
+
+The package config exposes a discovery variable *only if* a suppressions file is
+ever shipped in a future release, so you can wire it in without hardcoding a
+path (and its absence is itself the signal that none are needed):
+
+```cmake
+if(DEFINED IREE_RUNTIME_DIST_TSAN_SUPPRESSIONS)
+  set_tests_properties(your_tsan_test PROPERTIES
+    ENVIRONMENT "TSAN_OPTIONS=suppressions=${IREE_RUNTIME_DIST_TSAN_SUPPRESSIONS}")
+endif()
+```
+
+## 4. Fail-fast on a variant mismatch
+
+`manifest.json` and `BUILDINFO` record `sanitizer=thread` for this variant (and
+omit it for `default`). If your build enables a TSan gate but the fetched variant
+is not thread-sanitized, that is the mistake that produced the original false
+positives — assert against it:
+
+```
+grep -q '^sanitizer=thread' <prefix>/BUILDINFO   # or read manifest.json .sanitizer
+```
+
+## 5. What our gate proves
+
+CI runs exactly this: a clang-built consumer links `iree-runtime-dist::runtime`,
+loads the shipped `add.vmfb`, runs it over the **`local-task`** worker pool under
+`TSAN_OPTIONS=halt_on_error=1`, and requires **zero** TSan reports plus the
+correct result. You inherit a known-good procedure, not a claim.
+
+Pair with `iree-base-compiler==@COMPILER_VERSION@`, same as every variant.

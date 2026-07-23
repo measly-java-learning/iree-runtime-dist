@@ -322,4 +322,20 @@ else
   ASSERT_FAILS=$((ASSERT_FAILS+1))
 fi
 
+# Sanitizer variants ship the TSan runbook; default variants ship none. Key off
+# the prefix's own BUILDINFO sanitizer= line so this works for both.
+if grep -q '^sanitizer=thread' "$prefix/BUILDINFO" 2>/dev/null; then
+  if [ -s "$prefix/share/iree-runtime-dist/TSAN.md" ]; then
+    echo "ok: tsan prefix ships TSAN.md runbook"
+  else
+    echo "FAIL: tsan prefix is missing share/iree-runtime-dist/TSAN.md" >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+  fi
+elif [ -e "$prefix/share/iree-runtime-dist/TSAN.md" ]; then
+  echo "FAIL: non-sanitizer prefix must not ship TSAN.md" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+else
+  echo "ok: non-sanitizer prefix ships no TSAN.md"
+fi
+
 exit "$ASSERT_FAILS"
