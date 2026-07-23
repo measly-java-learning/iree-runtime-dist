@@ -347,4 +347,20 @@ else
   echo "ok: non-sanitizer prefix ships no TSAN.md"
 fi
 
+# Every variant ships the enriched constants metadata + their JSON schemas
+# (content is checked by constants.test.sh; this is presence only).
+for f in \
+  "element_types.json" \
+  "status_codes.json" \
+  "element_types.schema.json" \
+  "status_codes.schema.json"
+do
+  if [ -s "$prefix/share/iree-runtime-dist/$f" ]; then
+    echo "ok: ships share/iree-runtime-dist/$f"
+  else
+    echo "FAIL: missing share/iree-runtime-dist/$f" >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+  fi
+done
+
 exit "$ASSERT_FAILS"

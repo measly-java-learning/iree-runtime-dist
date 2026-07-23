@@ -53,16 +53,41 @@ case "$(get "$s" "['status_codes']['OK']['description']")" in
   *) echo "ok: OK has a description";;
 esac
 
-# schemas are valid JSON Schema and the data validates against them.
+# schemas are valid JSON Schema and the data validates against them. If
+# jsonschema is importable, do full schema validation; otherwise fall back to
+# the structural check spec section 5 mandates -- required keys must be
+# present -- rather than silently skipping (skipping here means this named
+# requirement never runs in CI, which has no jsonschema).
 python3 - "$tmp/out" <<'PY' && echo "ok: data validates against shipped schemas" || { echo "FAIL: schema validation" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); }
 import json,sys
+d = sys.argv[1]
 try:
     import jsonschema
+    have_jsonschema = True
 except ImportError:
-    print("skip: jsonschema not installed"); sys.exit(0)
-d=sys.argv[1]
-for data,schema in [("element_types.json","element_types.schema.json"),
-                    ("status_codes.json","status_codes.schema.json")]:
-    jsonschema.validate(json.load(open(f"{d}/{data}")), json.load(open(f"{d}/{schema}")))
+    have_jsonschema = False
+
+if have_jsonschema:
+    for data,schema in [("element_types.json","element_types.schema.json"),
+                        ("status_codes.json","status_codes.schema.json")]:
+        jsonschema.validate(json.load(open(f"{d}/{data}")), json.load(open(f"{d}/{schema}")))
+else:
+    et = json.load(open(f"{d}/element_types.json"))
+    for key in ("schema_version", "encoding", "element_types"):
+        assert key in et, f"element_types.json missing top-level key {key!r}"
+    enc = et["encoding"]
+    for key in ("formula", "numerical_types"):
+        assert key in enc, f"element_types.json encoding missing key {key!r}"
+    assert et["element_types"], "element_types.json element_types is empty"
+    sample = next(iter(et["element_types"].values()))
+    for field in ("value", "hex", "numerical_type", "category", "signed", "bit_count"):
+        assert field in sample, f"element_types.json entry missing field {field!r}"
+
+    sc = json.load(open(f"{d}/status_codes.json"))
+    for key in ("schema_version", "status_codes"):
+        assert key in sc, f"status_codes.json missing top-level key {key!r}"
+    assert sc["status_codes"], "status_codes.json status_codes is empty"
+    sample = next(iter(sc["status_codes"].values()))
+    assert "value" in sample, "status_codes.json entry missing field 'value'"
 PY
 exit "$ASSERT_FAILS"

@@ -11,19 +11,21 @@ import sys
 
 SCHEMA_VERSION = 1
 
-# Coarse category from the numerical-type high byte. Our classification
-# (documented in the schema), not an IREE-authoritative grouping.
-def _category(hi):
-    if hi == 0x00:                 return "opaque"
-    if hi == 0x13:                 return "boolean"
-    if hi in (0x10, 0x11, 0x12):   return "integer"
-    if hi == 0x23:                 return "complex"
-    if 0x20 <= hi <= 0x28:         return "float"
+# Coarse category from the numerical-type NAME (the authoritative decode --
+# resolved via the numerical-type enum, not re-derived from the hex value).
+# Our classification (documented in the schema), not an IREE-authoritative
+# grouping.
+def _category(nt_name):
+    if nt_name == "UNKNOWN":              return "opaque"
+    if nt_name == "BOOLEAN":              return "boolean"
+    if nt_name.startswith("INTEGER"):     return "integer"
+    if nt_name == "FLOAT_COMPLEX":        return "complex"
+    if nt_name.startswith("FLOAT"):       return "float"
     return "unknown"
 
-def _signed(hi):
-    if hi == 0x11: return True
-    if hi == 0x12: return False
+def _signed(nt_name):
+    if nt_name == "INTEGER_SIGNED":   return True
+    if nt_name == "INTEGER_UNSIGNED": return False
     return None   # sign-agnostic INT_*, booleans, floats, opaque
 
 # The one hand-authored input: short informational descriptions, curated from
@@ -55,12 +57,13 @@ def _enrich_element_types(values, num_enum):
     types = {}
     for name, value in values.items():
         hi = value >> 24
+        nt_name = by_value.get(hi, "UNKNOWN")
         types[name] = {
             "value": value,
             "hex": "0x%08x" % value,
-            "numerical_type": by_value.get(hi, "UNKNOWN"),
-            "category": _category(hi),
-            "signed": _signed(hi),
+            "numerical_type": nt_name,
+            "category": _category(nt_name),
+            "signed": _signed(nt_name),
             "bit_count": value & 0xFF,
         }
     return {
