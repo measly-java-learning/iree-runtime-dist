@@ -154,6 +154,6 @@ glibc_build=$GLIBC_BUILD
 cmake_flags=$(effective_cmake_flags "$VARIANT" | tr '\n' ' ')
 EOF
 
-[ -n "$SANITIZER" ] && echo "sanitizer=$SANITIZER" >> "$PREFIX/BUILDINFO" || true
+if [ -n "$SANITIZER" ]; then echo "sanitizer=$SANITIZER" >> "$PREFIX/BUILDINFO"; fi
 
 echo "==> generated manifest.json and BUILDINFO"
