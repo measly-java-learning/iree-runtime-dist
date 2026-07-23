@@ -349,6 +349,15 @@ echo "==> phase 1 complete"
 # --- Phase 2: relocatability repair, then proof ------------------------------
 . "$HERE/scripts/relocatability.sh"
 
+# Sanitizer variants build with -g, whose DWARF records the (neutral,
+# container-internal) build dir in DW_AT_comp_dir -- debug metadata, not link
+# surface. Let the assertion exempt build paths that live ONLY in debug
+# sections of objects/archives; a leak in any link-relevant content (a .cmake
+# config, a string table, an INTERFACE flag) still fails. Empty for default.
+if [ -n "$(variant_sanitizer "$VARIANT")" ]; then
+  export RELOC_ALLOW_DEBUG_PATHS=1
+fi
+
 echo "==> repairing relocatability"
 relocatability_repair "$PREFIX"
 

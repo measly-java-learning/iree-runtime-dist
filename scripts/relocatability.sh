@@ -89,7 +89,37 @@ relocatability_assert() { # <prefix> <build_path> <src_path> [extra_needle...]
     # enumerated explicitly as additional, non-generic boundaries. Escape the
     # needle so it's matched literally.
     escaped="$(printf '%s' "$needle" | sed -E 's/[][(){}.*+?^$|\\]/\\&/g')"
-    hits="$(grep -rlE -- "(^|[^A-Za-z0-9_./-]|-I|-L|-isystem|-F|-iquote|-isysroot)${escaped}" "$prefix" 2>/dev/null || true)"
+    local pattern="(^|[^A-Za-z0-9_./-]|-I|-L|-isystem|-F|-iquote|-isysroot)${escaped}"
+    hits="$(grep -rlE -- "$pattern" "$prefix" 2>/dev/null || true)"
+
+    # RELOC_ALLOW_DEBUG_PATHS: sanitizer variants build with -g, whose DWARF
+    # embeds the (neutral, container-internal) build directory in DW_AT_comp_dir.
+    # That is debug metadata, not link surface -- it does not affect whether or
+    # where the archive links. When this is set, a hit in an object/archive is
+    # re-checked with debug sections stripped; if the path survives stripping it
+    # is a REAL leak (a link-relevant string, a baked -I flag, an INTERFACE
+    # option) and still fails. Only debug-section-only paths are exempted. Text
+    # files (e.g. *.cmake) are never exempted -- a leak there is always real.
+    if [ -n "$hits" ] && [ "${RELOC_ALLOW_DEBUG_PATHS:-0}" = 1 ]; then
+      local surviving="" f tmp
+      for f in $hits; do
+        case "$f" in
+          *.a|*.o|*.so|*.so.*)
+            tmp="$(mktemp)"
+            if objcopy --strip-debug "$f" "$tmp" 2>/dev/null \
+                 && ! grep -qE -- "$pattern" "$tmp"; then
+              : # path was debug-only -> exempt
+            else
+              surviving="$surviving $f"   # survives strip (or strip failed) -> real
+            fi
+            rm -f "$tmp"
+            ;;
+          *) surviving="$surviving $f" ;;  # non-object -> always real
+        esac
+      done
+      hits="$(printf '%s' "${surviving# }")"
+    fi
+
     if [ -n "$hits" ]; then
       echo "error: build-machine path '$needle' leaked into the staged prefix:" >&2
       printf '  %s\n' $hits >&2

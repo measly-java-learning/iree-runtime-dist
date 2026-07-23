@@ -163,4 +163,34 @@ esac
 
 rm -rf "$meta_tmp"
 
+# --- RELOC_ALLOW_DEBUG_PATHS must exempt ONLY debug-section paths ------------
+# Sanitizer variants build with -g, whose DWARF embeds the build dir. The flag
+# lets the assertion ignore build paths that live only in an object's debug
+# sections -- but a leak in a text/config file is never debug info and must
+# still fail, flag or not. (The binary/debug-only exemption itself is validated
+# in-container by the real tsan build, because host grep matches binary content
+# differently; here we lock down the teeth that ARE host-reliable: a .cmake leak
+# is always caught.)
+dbg_tmp="$(mktemp -d)"
+mkdir -p "$dbg_tmp/lib/cmake/IreeRuntimeDist"
+printf 'set(LEAK "/work/iree-build-tsan/x")\n' > "$dbg_tmp/lib/cmake/IreeRuntimeDist/Config.cmake"
+
+if RELOC_ALLOW_DEBUG_PATHS=1 relocatability_assert "$dbg_tmp" /work/iree-build-tsan /nonexistent-src >/dev/null 2>&1; then
+  echo "FAIL: RELOC_ALLOW_DEBUG_PATHS wrongly exempted a leak in a .cmake text file" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+else
+  echo "ok: debug-path exemption still catches a non-debug (.cmake) leak"
+fi
+
+# And a clean prefix must pass with the flag on (no false positive).
+clean_tmp="$(mktemp -d)"; mkdir -p "$clean_tmp/lib"
+printf 'relative/path/only\n' > "$clean_tmp/lib/ok.cmake"
+if RELOC_ALLOW_DEBUG_PATHS=1 relocatability_assert "$clean_tmp" /work/iree-build-tsan /nonexistent-src >/dev/null 2>&1; then
+  echo "ok: clean prefix passes with the flag on"
+else
+  echo "FAIL: flag produced a false positive on a clean prefix" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+fi
+rm -rf "$dbg_tmp" "$clean_tmp"
+
 exit "$ASSERT_FAILS"
