@@ -89,14 +89,20 @@ The release matrix threads `variants_json` through the `setup` job's outputs (ne
 `variants` output), and the `build`/`verify` job matrices consume it via
 `fromJson(needs.setup.outputs.variants)` — deleting the two hardcoded `variant: [default]` lists.
 
-`CMAKE_BUILD_TYPE`: `common_flags` keeps `Release`; `tsan`'s `variant_flags` sets
-`-DCMAKE_BUILD_TYPE=RelWithDebInfo` so the existing variant-wins-by-name dedup gives it symbolized
-frames without a second mechanism.
+`CMAKE_BUILD_TYPE`: **`Release` for every variant**, including `tsan`. Symbolized TSan frames come
+from `-g` in `variant_cflags`, not from `RelWithDebInfo`. This is deliberate and load-bearing:
+switching `tsan` to `RelWithDebInfo` would make CMake emit the export under a different config name
+(`IREETargets-Runtime-relwithdebinfo.cmake`, `IMPORTED_LOCATION_RELWITHDEBINFO`), silently breaking
+the recipe's libbacktrace repair and the relocatability assertion, both hardcoded to the `RELEASE`
+config. `Release` + `-g` yields optimized code with debug info and keeps the export config name
+`release`, so every existing repair applies unchanged. (Discovered during plan grounding; this
+supersedes an earlier draft that used `RelWithDebInfo`.)
 
 ### 4.2 The `tsan` variant
 
 - **Flags:** common set (compiler OFF, static, PIC, threading ON, `local-sync`+`local-task`,
-  `embedded-elf`+`system-library`) + `RelWithDebInfo` + `variant_cflags` = `-fsanitize=thread -g`.
+  `embedded-elf`+`system-library`, `Release`) + `variant_cflags` = `-fsanitize=thread -g`. Same
+  `CMAKE_BUILD_TYPE` as `default` — see §4.1 for why not `RelWithDebInfo`.
 - **Same everything else as `default`:** `runtime_commit`, `iree_version`, `vm_bytecode_version`,
   glibc floor, platform set, and the *same manylinux 2.28 image* (#10 §3 — no ABI skew, no
   consumer container breakage, `gh attestation` on every variant tarball unchanged).
@@ -223,9 +229,9 @@ present), and `manifest.json`'s `notes` references it. The djl-iree-engine hando
 
 **Hermetic (`test/*.test.sh`, via `test/run.sh`, no build):**
 - `variants.sh`: `known_variants` = `default tsan`; `variants_json` is a valid JSON array;
-  `variant_cflags default` empty, `variant_cflags tsan` = `-fsanitize=thread -g`; `tsan`'s
-  effective flags include `-fsanitize=thread` (via cflags) and `RelWithDebInfo` winning over
-  `Release`.
+  `variant_cflags default` empty, `variant_cflags tsan` = `-fsanitize=thread -g`;
+  `variant_sanitizer tsan` = `thread`; `tsan`'s capability flags are identical to `default`'s
+  (same `Release`, same drivers/loaders) — the two differ only in `variant_cflags`.
 - Pin helper: generated `IreeRuntimePin.cmake` defines `iree_runtime_dist_url`, resolves a known
   variant/platform to the right URL+SHA, and `FATAL_ERROR`s on an unknown combo. Mutation-checked
   so the fail-fast branch has teeth.
