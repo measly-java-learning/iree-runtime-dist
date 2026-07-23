@@ -31,3 +31,19 @@ endif()
 message(STATUS
   "iree-runtime-dist ${IREE_RUNTIME_DIST_VERSION} (${IREE_RUNTIME_DIST_VARIANT}/${IREE_RUNTIME_DIST_PLATFORM}), "
   "pair with iree-base-compiler==${IREE_RUNTIME_DIST_COMPILER_VERSION}")
+
+# Sanitizer variants propagate their flag as an INTERFACE option so a consumer
+# linking iree-runtime-dist::runtime instruments their whole program and cannot
+# mismatch flags (spec §4.2). The target name/semantics are otherwise identical
+# to the default variant.
+if(IREE_RUNTIME_DIST_VARIANT STREQUAL "tsan")
+  set(IREE_RUNTIME_DIST_SANITIZER "thread")
+  target_compile_options(iree-runtime-dist::runtime INTERFACE -fsanitize=thread)
+  target_link_options(iree-runtime-dist::runtime INTERFACE -fsanitize=thread)
+  # Present iff the recipe shipped a suppressions file (gate C). Its presence is
+  # itself the fail-fast signal that suppressions are required; absence means none.
+  if(EXISTS "${_IRD_PREFIX}/share/iree-runtime-dist/tsan.supp")
+    set(IREE_RUNTIME_DIST_TSAN_SUPPRESSIONS
+        "${_IRD_PREFIX}/share/iree-runtime-dist/tsan.supp")
+  endif()
+endif()

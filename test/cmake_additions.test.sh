@@ -3,6 +3,27 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/assert.sh"
+
+# Hermetic: render the template with sed exactly as build-runtime.sh does, no
+# build required. Runs even when no prefix is given (test/run.sh).
+render() { sed -e "s|@IREE_VERSION@|3.11.0|g" -e "s|@COMPILER_VERSION@|3.11.0|g" \
+  -e "s|@VARIANT@|$1|g" -e "s|@PLATFORM@|linux-x86_64|g" -e "s|@RUNTIME_COMMIT@|abc|g" \
+  "$here/../cmake/IreeRuntimeDist.cmake.in"; }
+d="$(render default)"; t="$(render tsan)"
+case "$t" in *"-fsanitize=thread"*) echo "ok: tsan config propagates sanitizer";; *) echo "FAIL: tsan missing INTERFACE sanitizer" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1));; esac
+# NOTE: the tsan-only flag lives inside a static
+# `if(IREE_RUNTIME_DIST_VARIANT STREQUAL "tsan")` block in the shared template.
+# sed substitution cannot strip dead CMake conditional branches (only real CMake
+# evaluation can, which needs find_package(IREERuntime REQUIRED ...) to resolve
+# against an actual built prefix -- not available hermetically). So the literal
+# "-fsanitize=thread" text is present in BOTH renders; what must differ, and does,
+# is the value fed into the guard that controls whether it ever fires. Assert that
+# instead. Real gating (default binaries carry no tsan instrumentation) is proven
+# at Task 9's consumer acceptance test via absence of __tsan_ symbols.
+case "$d" in *'IREE_RUNTIME_DIST_VARIANT          "tsan"'*) echo "FAIL: default must not render as tsan variant" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1));; *) echo "ok: default variant guard does not select tsan";; esac
+assert_contains "$t" "IREE_RUNTIME_DIST_TSAN_SUPPRESSIONS" "tsan exposes suppressions discovery var"
+assert_contains "$t" "IREE_RUNTIME_DIST_SANITIZER" "tsan exposes sanitizer var"
+
 prefix="${1:-}"
 if [ -z "$prefix" ]; then echo "skip: cmake_additions.test.sh needs a built prefix"; exit 0; fi
 
