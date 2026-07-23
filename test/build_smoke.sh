@@ -322,6 +322,15 @@ else
   ASSERT_FAILS=$((ASSERT_FAILS+1))
 fi
 
+# Every variant ships the share/ README documenting the layout + JSON schema
+# for non-CMake consumers (consumer report #6).
+if [ -s "$prefix/share/iree-runtime-dist/README.md" ]; then
+  echo "ok: ships share/iree-runtime-dist/README.md"
+else
+  echo "FAIL: missing share/iree-runtime-dist/README.md" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+fi
+
 # Sanitizer variants ship the TSan runbook; default variants ship none. Key off
 # the prefix's own BUILDINFO sanitizer= line so this works for both.
 if grep -q '^sanitizer=thread' "$prefix/BUILDINFO" 2>/dev/null; then

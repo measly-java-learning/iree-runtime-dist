@@ -1,0 +1,38 @@
+# iree-runtime-dist artifact metadata
+
+This directory (`share/iree-runtime-dist/`) holds the machine-readable metadata and the smoke
+module shipped with the `@VARIANT@/@PLATFORM@` build of the IREE runtime, version `@IREE_VERSION@`.
+
+## Path convention (stable contract)
+
+Every file here lives at `share/iree-runtime-dist/<name>` under the extraction/install prefix.
+This relative layout is a **stable contract** — rely on it directly from any build system
+(Gradle, Python, Rust, …); you do not need CMake to locate these files.
+
+| File | What it is |
+|---|---|
+| `manifest.json` | build/pairing provenance (`schema_version: 2`) |
+| `element_types.json` | `IREE_HAL_ELEMENT_TYPE_*` name → value, generated from IREE's headers |
+| `status_codes.json` | `iree_status_code_t` name → value, generated from IREE's headers |
+| `add.vmfb` | smoke module: `@add(tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>`, compiled by the paired compiler |
+| `README.md` | this file |
+| `TSAN.md` | *(tsan variant only)* the ThreadSanitizer consumer runbook |
+
+`BUILDINFO` (at the prefix root, not here) is the same provenance as `manifest.json` in a
+line-oriented `key=value` form for shell consumers.
+
+## JSON schema
+
+`element_types.json` and `status_codes.json` are each a **flat JSON object mapping a string name
+to a decimal integer**, with no envelope and no version field:
+
+```json
+{ "FLOAT_32": 553648160, "SINT_32": 285212704, "INT_32": 268435488, ... }
+```
+
+Values are the exact numeric constants from the shipped runtime's own headers — generate your
+bindings from these rather than transcribing (e.g. `FLOAT_32 = 553648160 = 0x21000020`). The
+counts (24 element types, 19 status codes) are not part of the contract; iterate the object.
+
+`manifest.json` is a structured object and carries its own `schema_version` and `notes.*` fields;
+read those notes before interpreting `glibc_build`, `sanitizer`, or `vm_bytecode_version`.

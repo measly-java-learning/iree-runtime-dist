@@ -36,14 +36,23 @@ Three assets: the tarball, its `.sha256`, and `IreeRuntimePin.cmake`. The pin dr
 verified: I downloaded the published pin, followed its URL, and its recorded SHA-256 matches the
 2.43 MB tarball byte-for-byte.
 
+**The pin is coordinates-only (consumer report #2).** `IreeRuntimePin.cmake` defines *data* — a
+URL/SHA helper — and nothing else. It does not fetch, extract, or `find_package`. Dropping it in
+and `include()`-ing it is step one of three; your `CMakeLists.txt` still performs the fetch and
+points `find_package` at the extracted prefix. The full chain:
+
 ```cmake
-include(IreeRuntimePin.cmake)
+include(IreeRuntimePin.cmake)                        # 1. coordinates only
 
 set(IREE_RUNTIME_VARIANT default)   # or "tsan" -- see "TSan variant" below
 iree_runtime_dist_url("${IREE_RUNTIME_VARIANT}" linux-x86_64 _url _sha)
 
-include(FetchContent)
-FetchContent_Declare(iree_runtime URL "${_url}" URL_HASH "SHA256=${_sha}")
+include(FetchContent)                                # 2. you fetch + extract
+FetchContent_Declare(iree_runtime_dist URL "${_url}" URL_HASH "SHA256=${_sha}")
+FetchContent_MakeAvailable(iree_runtime_dist)
+
+list(APPEND CMAKE_PREFIX_PATH "${iree_runtime_dist_SOURCE_DIR}")
+find_package(IreeRuntimeDist REQUIRED)               # 3. then find_package
 ```
 
 **Clean break from what this doc originally showed you.** The pin used to define flat
@@ -125,10 +134,15 @@ There is no shared object in the artifact. **Your JNI shim is the only `.so`**, 
 - PIC matters, and it is on. **Verified** — sampled objects from `libiree_runtime_unified.a`
   carry GOTPCREL/PLT32 relocations, and `manifest.json` attests
   `CMAKE_POSITION_INDEPENDENT_CODE: ON`. Static archives link into your shared object cleanly.
-- Symbol visibility is a question we have **not** answered: linking these archives into your
-  `.so` will, by default, export IREE symbols from it. If DJL loads other native engines in the
-  same JVM, consider a version script or `-fvisibility=hidden` on the shim. *Untested by us —
-  flagging, not prescribing.*
+- Symbol visibility — **answered, measured (consumer report #4).** Link the umbrella target into
+  your `.so` with `-Wl,--exclude-libs,ALL` (GNU ld / LLD): on the resulting `libiree_djl.so`,
+  1348 IREE symbols are linked in and **0 are exported** — the dynamic table is just the 4 JNI
+  entry points, the 2 JNI lifecycle hooks, and a few weak C++ template symbols from the shim's own
+  TUs. `--exclude-libs,ALL` suppresses symbols from static archives specifically, which is exactly
+  this dist's shape (0 `.so`, 198 `.a`), so it is the right tool. Caveats: it does not suppress
+  the consumer's own weak/vague-linkage symbols (add a version script or `-fvisibility=hidden` if
+  you want a truly minimal table), and it is linker-specific — a different linker (or Windows, once
+  that platform ships) needs the equivalent.
 
 ### 3.2 `glibc_build` is not a floor — this replaces wishlist #8's framing
 
@@ -166,11 +180,22 @@ So one artifact gives you both the single-threaded and multithreaded execution p
 **at runtime by driver name**, not at build time. This is better than the wishlist's plan for
 you: no variant switch needed to A/B `local-sync` against `local-task`.
 
-But note the caveat the wishlist itself raised, now unavoidable: **`IREE_ENABLE_THREADING=ON` and
-`local-task` is compiled in**, so the TSan-free-by-construction property of the skeleton's
-`minimal` target is gone. If you want a TSan-clean leg, you get it by *using `local-sync` at
-runtime*, not by linking a different artifact. Whether that is sufficient for TSan purposes is
-**your call and untested by us**.
+`IREE_ENABLE_THREADING=ON` and `local-task` is compiled in, so the `minimal` target's
+TSan-free-*by-construction* property is gone. But the TSan-clean leg survives *empirically*
+(consumer report #7, measured): selecting `local-sync` at runtime spawns **zero** threads even
+with `local-task`'s worker pool linked in — verified two ways during an active
+load/invoke run (`strace` saw no `clone`/`clone3`; `/proc/<pid>/status` showed `Threads: 1`),
+with zero TSan data races over 100 cycles. So a consumer that only ever creates `local-sync`
+devices gets the same thread-free execution the old `minimal` build gave — as a fact about IREE's
+driver implementation, not a linker-enforced guarantee. This closes the "your call, untested"
+gap for TSan purposes. (Not tested: `local-task` itself, which spawns workers by design and needs
+real TSan coverage of concurrent invokes; and thread-count stability inside a long-running
+JVM-embedded process.) Note this argues against needing a `minimal` variant *for TSan* — it does
+not address `minimal`'s other possible motivations (binary size, symbol count).
+
+Separately, if you want a genuinely instrumented TSan build of the runtime itself (to race-test
+`local-task`, or your own code that calls into it), that is now the **`tsan` variant** — see §1's
+"TSan variant" and the shipped `TSAN.md`.
 
 Not shipped: `devtools` (tracing is OFF — wishlist's Tracy/allocation-stats variant does not
 exist yet) and `gpu`. Both remain open requests.
@@ -241,6 +266,16 @@ through six tasks.
 `status_codes.json` gives you typed Java exceptions (`OK=0`, `INVALID_ARGUMENT=3`, …) instead of
 a `RuntimeException` carrying only a message string.
 
+**Schema and non-CMake discovery (consumer report #6).** Both files are a **flat JSON object,
+`{ "NAME": <decimal int>, ... }`** — no envelope, no version field. The **stable path convention**
+is `share/iree-runtime-dist/<name>` under the extraction/install prefix, for *every* artifact in
+that dir (`element_types.json`, `status_codes.json`, `manifest.json`, `add.vmfb`, and — tsan only
+— `TSAN.md`). That relative layout is a contract, not an accident of how
+`IreeRuntimeDistConfig.cmake` is written, so a Gradle/Python/Rust consumer can hardcode it without
+going through CMake variables or `FetchContent` internals. Starting with the **next** release
+(after v3.11.0-4) the tarball also ships `share/iree-runtime-dist/README.md` documenting exactly
+this, so non-CMake consumers have it in-artifact rather than having to reverse-engineer it.
+
 ---
 
 ## 5. `add.vmfb` — wishlist #6, delivered
@@ -249,8 +284,13 @@ a `RuntimeException` carrying only a message string.
 against this runtime. Path available as `IREE_RUNTIME_DIST_ADD_VMFB`.
 
 Use it exactly as intended: a post-link smoke test that the runtime loads and runs a known
-module, **with no compiler installed anywhere in your build**. It takes four `int32` inputs and
-returns their pairwise sums; our acceptance test asserts `[11, 22, 33, 44]`.
+module, **with no compiler installed anywhere in your build**. Its signature is
+`@add(tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>` — **four `f32` inputs**, elementwise sum
+(source: `emit/add.mlir`, `arith.addf`). Our acceptance test asserts `[11, 22, 33, 44]`. The
+element-type tag baked into the module is `FLOAT_32` (`0x21000020`); passing `i32` inputs is
+rejected at the buffer-view assert with `INVALID_ARGUMENT ... expected f32 (21000020)`. (Corrected
+per consumer report #5 — an earlier revision of this doc wrongly said `int32`; the golden values
+were always right, only the element-type claim was wrong.)
 
 ---
 
@@ -349,6 +389,12 @@ platform lists are single-sourced, so additions are cheap.
   unlinked archives.
 - All 24 element-type and 19 status-code values read from the shipped JSON.
 
-**Not verified, flagged as such:** JNI symbol-visibility behavior when the shim is loaded
-alongside other DJL native engines (§3.1), and whether runtime `local-sync` selection is
-sufficient for a TSan-clean leg given `local-task` is compiled in (§3.3).
+**Both originally-open questions are now answered by the consumer, measured** (reports #4, #7):
+- **Symbol visibility (§3.1):** `-Wl,--exclude-libs,ALL` exports 0 IREE symbols from the JNI `.so`.
+- **`local-sync` TSan-clean leg (§3.3):** runtime `local-sync` selection spawns 0 threads and
+  reports 0 races even with `local-task` linked in.
+
+Still genuinely untested here: co-loading alongside another DJL native engine in one JVM (though
+a zero-IREE-symbol export table makes a collision structurally implausible), and `local-task`'s
+own thread behavior under TSan — which is what the new **`tsan` variant** exists to let you
+race-test (§1).

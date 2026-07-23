@@ -377,6 +377,16 @@ bash "$HERE/scripts/gen-manifest.sh" "$PREFIX" "$VARIANT" "$PLATFORM" \
 echo "==> collecting license notices"
 bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC" "$BUILD_DIR"
 
+# Ship an in-artifact README documenting the share/ layout + JSON schema, so a
+# non-CMake consumer (Gradle/Python/Rust) has the path convention and file shapes
+# without reverse-engineering IreeRuntimeDistConfig.cmake (consumer report #6).
+echo "==> shipping share/ README"
+sed -e "s|@IREE_VERSION@|${IREE_VERSION}|g" \
+    -e "s|@VARIANT@|${VARIANT}|g" \
+    -e "s|@PLATFORM@|${PLATFORM}|g" \
+    "$HERE/docs/share-README.md.in" \
+    > "$PREFIX/share/iree-runtime-dist/README.md"
+
 # Sanitizer variants ship a consumer runbook (build with clang, ASLR note,
 # suppressions wiring). A default prefix ships none.
 if [ -n "$(variant_sanitizer "$VARIANT")" ]; then
