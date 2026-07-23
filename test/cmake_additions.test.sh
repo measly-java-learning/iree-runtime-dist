@@ -25,7 +25,7 @@ assert_contains "$t" "IREE_RUNTIME_DIST_TSAN_SUPPRESSIONS" "tsan exposes suppres
 assert_contains "$t" "IREE_RUNTIME_DIST_SANITIZER" "tsan exposes sanitizer var"
 
 prefix="${1:-}"
-if [ -z "$prefix" ]; then echo "skip: cmake_additions.test.sh needs a built prefix"; exit 0; fi
+if [ -z "$prefix" ]; then echo "skip: cmake_additions.test.sh prefix checks (hermetic render checks ran)"; exit "$ASSERT_FAILS"; fi
 
 v="$prefix/lib/cmake/IREE/IREERuntimeConfigVersion.cmake"
 if [ -s "$v" ]; then echo "ok: version file present (upstream omits it)"
