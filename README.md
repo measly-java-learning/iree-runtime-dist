@@ -62,14 +62,24 @@ lib/                        # 198 static archives (PIC)
 include/                    # 367 public headers (374 files under include/, counting .inl)
 share/iree-runtime-dist/
   manifest.json              # schema_version 2: pairing + build-config attestation
-  element_types.json         # IREE_HAL_ELEMENT_TYPE_* generated from IREE headers
-  status_codes.json          # iree_status_code_t generated from IREE headers
+  element_types.json         # IREE_HAL_ELEMENT_TYPE_* generated from IREE headers, enriched
+  element_types.schema.json  # JSON Schema (2020-12) for element_types.json
+  status_codes.json          # iree_status_code_t generated from IREE headers, enriched
+  status_codes.schema.json   # JSON Schema (2020-12) for status_codes.json
   add.vmfb                   # smoke module, compiled by the paired compiler
 LICENSE
 THIRD-PARTY-NOTICES/
   flatcc/  printf/  libbacktrace/
 BUILDINFO
 ```
+
+`element_types.json` and `status_codes.json` are self-describing (`schema_version` + per-entry
+properties — value, numerical type, signedness, bit width for element types; value + curated
+description for status codes), not a flat name-to-int map, and ship with JSON Schemas alongside
+the data. The same four files, plus a README, are also published as their own
+`iree-runtime-metadata-<version>.zip` release asset — one stable URL for non-CMake consumers
+(Gradle, Python, Rust, …) to fetch independent of the native tarball. This asset starts shipping
+with the **next** tagged release, not `v3.11.0-3`.
 
 `THIRD-PARTY-NOTICES/` covers exactly the third-party code actually *linked* into the shipped
 archives (determined empirically from the CMake export set's transitive link closure and cross-

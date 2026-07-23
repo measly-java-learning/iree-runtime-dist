@@ -12,8 +12,10 @@ This relative layout is a **stable contract** — rely on it directly from any b
 | File | What it is |
 |---|---|
 | `manifest.json` | build/pairing provenance (`schema_version: 2`) |
-| `element_types.json` | `IREE_HAL_ELEMENT_TYPE_*` name → value, generated from IREE's headers |
-| `status_codes.json` | `iree_status_code_t` name → value, generated from IREE's headers |
+| `element_types.json` | `IREE_HAL_ELEMENT_TYPE_*` name → enriched entry, generated from IREE's headers |
+| `element_types.schema.json` | JSON Schema (2020-12) for `element_types.json` |
+| `status_codes.json` | `iree_status_code_t` name → enriched entry, generated from IREE's headers |
+| `status_codes.schema.json` | JSON Schema (2020-12) for `status_codes.json` |
 | `add.vmfb` | smoke module: `@add(tensor<4xf32>, tensor<4xf32>) -> tensor<4xf32>`, compiled by the paired compiler |
 | `README.md` | this file |
 | `TSAN.md` | *(tsan variant only)* the ThreadSanitizer consumer runbook |
@@ -23,16 +25,44 @@ line-oriented `key=value` form for shell consumers.
 
 ## JSON schema
 
-`element_types.json` and `status_codes.json` are each a **flat JSON object mapping a string name
-to a decimal integer**, with no envelope and no version field:
+`element_types.json` and `status_codes.json` are each a versioned, self-describing object — not a
+flat name-to-int map. Both carry a top-level `schema_version`.
+
+`element_types.json` also carries an `encoding` block describing how IREE packs each value
+(`value = (numerical_type << 24) | bit_count`) plus the `numerical_types` enum (`INTEGER`,
+`INTEGER_SIGNED`, `INTEGER_UNSIGNED`, `BOOLEAN`, `FLOAT`, `FLOAT_IEEE`, `FLOAT_BRAIN`,
+`FLOAT_COMPLEX`, the FP8 variants, …), and its `element_types` object maps each NAME to an entry
+with `value`, `hex` (`value` formatted `0x%08x`), `numerical_type`, `category` (a coarser bucket:
+`integer` / `float` / `boolean` / `complex` / `opaque`), `signed` (`true`/`false`/`null`), and
+`bit_count`:
 
 ```json
-{ "FLOAT_32": 553648160, "SINT_32": 285212704, "INT_32": 268435488, ... }
+{
+  "schema_version": 1,
+  "encoding": { "formula": "value = (numerical_type << 24) | bit_count",
+                "numerical_types": { "INTEGER": 16, "INTEGER_SIGNED": 17, "FLOAT_IEEE": 33, "...": "..." } },
+  "element_types": {
+    "FLOAT_32": { "value": 553648160, "hex": "0x21000020", "numerical_type": "FLOAT_IEEE",
+                  "category": "float", "signed": null, "bit_count": 32 }
+  }
+}
 ```
 
-Values are the exact numeric constants from the shipped runtime's own headers — generate your
-bindings from these rather than transcribing (e.g. `FLOAT_32 = 553648160 = 0x21000020`). The
-counts (24 element types, 19 status codes) are not part of the contract; iterate the object.
+`status_codes.json` carries `schema_version` and a `status_codes` object mapping each NAME to
+`{ "value": <int>, "description": "<one-line human meaning>" }` (`description` is curated,
+informational text — not part of the value contract).
+
+Every field except `description` is derived authoritatively from the shipped runtime's own
+headers, not hand-transcribed — generate your bindings from these rather than transcribing (e.g.
+`FLOAT_32 = 553648160 = 0x21000020`). The counts (24 element types, 19 status codes) are not part
+of the contract; iterate the object. `element_types.schema.json` and `status_codes.schema.json`
+(JSON Schema 2020-12, per-field `description`s) ship alongside the data for validation and editor
+tooling.
+
+**The boundary:** these per-type properties (value, numerical type, signedness, bit width) are
+authoritative — but *which* IREE type best matches one of your own native types (e.g. choosing
+between sign-agnostic `INT_32`, signed `SINT_32`, and unsigned `UINT_32` for your own `int`) is
+your integration's policy decision, not something this data can make for you.
 
 `manifest.json` is a structured object and carries its own `schema_version` and `notes.*` fields;
 read those notes before interpreting `glibc_build`, `sanitizer`, or `vm_bytecode_version`.

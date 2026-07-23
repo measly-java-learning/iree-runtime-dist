@@ -250,31 +250,55 @@ includes code never linked.
 ## 4. Generated constants — wishlist #4 and #5, delivered
 
 `share/iree-runtime-dist/element_types.json` (24 entries) and `status_codes.json` (19 entries),
-emitted by a program compiled against the shipped headers. **Your hard-won value checks out:**
+emitted by a program compiled against the shipped headers, then enriched by
+`scripts/enrich-constants.py` into a self-describing shape. **Your hard-won value checks out**,
+now as one field of a richer entry:
 
+```json
+"FLOAT_32": { "value": 553648160, "hex": "0x21000020", "numerical_type": "FLOAT_IEEE",
+              "category": "float", "signed": null, "bit_count": 32 }
 ```
-FLOAT_32   553648160   0x21000020    <- the wishlist's corrected value, confirmed
-SINT_32    285212704   0x11000020
-INT_32     268435488   0x10000020
-BFLOAT_16  570425360   0x22000010
-```
+
+(`553648160` / `0x21000020` is the wishlist's corrected value, confirmed — `SINT_32` is
+`285212704` / `0x11000020`, `INT_32` is `268435488` / `0x10000020`, `BFLOAT_16` is `570425360` /
+`0x22000010`, same as before.) `numerical_type`, `category`, `signed`, and `bit_count` are decoded
+from `value` itself (IREE packs `value = (numerical_type << 24) | bit_count`) against IREE's own
+enum, not a hand-copied table.
 
 Generate `IreeDataTypes.java` from this JSON at build time. Do not transcribe it — the whole
 reason this file exists is that `FLOAT_32` was hard-coded as `0x00000120` and stayed invisible
 through six tasks.
 
 `status_codes.json` gives you typed Java exceptions (`OK=0`, `INVALID_ARGUMENT=3`, …) instead of
-a `RuntimeException` carrying only a message string.
+a `RuntimeException` carrying only a message string; each entry is now `{ "value": <int>,
+"description": "<curated one-line meaning>" }` rather than a bare integer.
 
-**Schema and non-CMake discovery (consumer report #6).** Both files are a **flat JSON object,
-`{ "NAME": <decimal int>, ... }`** — no envelope, no version field. The **stable path convention**
-is `share/iree-runtime-dist/<name>` under the extraction/install prefix, for *every* artifact in
-that dir (`element_types.json`, `status_codes.json`, `manifest.json`, `add.vmfb`, and — tsan only
-— `TSAN.md`). That relative layout is a contract, not an accident of how
+**Schema, the boundary, and non-CMake discovery (consumer report #6).** Both files carry a
+top-level `schema_version` and are no longer a flat `{ "NAME": <int> }` map — see the entry shape
+above. `element_types.schema.json` and `status_codes.schema.json` (JSON Schema 2020-12, per-field
+`description`s) ship alongside the data for validation and codegen. **This removes only the
+objective half of the mapping problem.** Each type's value, numerical-type category, signedness,
+and bit width are now authoritative, no-judgment data straight from IREE's headers. But *which*
+IREE type best fits one of your own native types is still your call: IREE offers `INT_32`
+(sign-agnostic, `signed: null`), `SINT_32` (`signed: true`), and `UINT_32` (`signed: false`) as
+genuinely distinct types, and there is no IREE-authoritative "canonical signed 32-bit" — choosing
+one for your Java `int` is policy, not a fact this data can resolve for you. Enrichment shrinks
+and de-risks that integration work; it does not eliminate it.
+
+The **stable path convention** is `share/iree-runtime-dist/<name>` under the extraction/install
+prefix, for *every* artifact in that dir (`element_types.json`, `element_types.schema.json`,
+`status_codes.json`, `status_codes.schema.json`, `manifest.json`, `add.vmfb`, and — tsan only —
+`TSAN.md`). That relative layout is a contract, not an accident of how
 `IreeRuntimeDistConfig.cmake` is written, so a Gradle/Python/Rust consumer can hardcode it without
-going through CMake variables or `FetchContent` internals. Starting with the **next** release
-(after v3.11.0-4) the tarball also ships `share/iree-runtime-dist/README.md` documenting exactly
-this, so non-CMake consumers have it in-artifact rather than having to reverse-engineer it.
+going through CMake variables or `FetchContent` internals. The tarball also ships
+`share/iree-runtime-dist/README.md` documenting exactly this, so non-CMake consumers have it
+in-artifact rather than having to reverse-engineer it.
+
+**A second, CMake-free path starting with the next tagged release:** the `release` job also
+uploads `iree-runtime-metadata-<version>.zip` as its own release asset — the same four JSON/schema
+files plus a README, built once per release (the constants are variant-independent). One stable
+URL, unzip, read: no `FetchContent`, no CMake, no `build.sh:97`-style copy-and-restage across
+Gradle/CI jobs. This is not published yet as of `v3.11.0-3`; it lands with the next tag.
 
 ---
 
