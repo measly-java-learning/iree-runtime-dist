@@ -7,9 +7,11 @@ consumers.
 Consumers (e.g. `djl-iree-engine`) do not build IREE. They `FetchContent` a pinned tarball and
 `find_package` it.
 
-**No release has been cut yet.** No GitHub repo exists for this project either — the pin file
-generator (`scripts/gen-pin.sh`) has only ever been run against a placeholder org slug. Nothing
-below that references a release URL should be read as "this resolves today."
+**Release status.** The repo lives at `measly-java-learning/iree-runtime-dist`, and `v3.11.0-3`
+published successfully (single `default` variant, old flat-variable pin). The variant matrix and
+the `tsan` variant documented below are committed but **not yet in a published release** — the
+next tag is what first publishes `tsan` assets and the helper-based pin. Treat `tsan` release
+URLs below as "resolves after the next tag," not today.
 
 ## Why this isn't a thin wrapper
 
