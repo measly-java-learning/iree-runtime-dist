@@ -86,14 +86,22 @@ else
   ASSERT_FAILS=$((ASSERT_FAILS+1))
 fi
 
-# PIC: a non-PIC x86-64 archive shows R_X86_64_32/32S relocations.
+# PIC: non-PIC x86-64 CODE shows R_X86_64_32/32S relocations. Scope this to
+# code/data sections only -- DWARF debug sections (.debug_*) legitimately use
+# 32-bit absolute offsets into .debug_str/.debug_info in EVERY -g build, and
+# they say nothing about whether .text is position-independent. The sanitizer
+# variant builds with -g, so a naive scan of all relocations false-positives on
+# its debug info; only relocations in non-.debug sections indicate non-PIC code.
 bad=0
 for a in "$prefix"/lib/*.a; do
-  if readelf -r "$a" 2>/dev/null | grep -qE 'R_X86_64_(32|32S)[[:space:]]'; then
-    echo "FAIL: non-PIC relocations in $(basename "$a")" >&2; bad=1
+  if readelf -r "$a" 2>/dev/null | awk '
+      /^Relocation section/ { indbg = ($0 ~ /\.debug/) }
+      !indbg && /R_X86_64_(32|32S)[[:space:]]/ { found=1 }
+      END { exit(found ? 0 : 1) }'; then
+    echo "FAIL: non-PIC relocations in code section of $(basename "$a")" >&2; bad=1
   fi
 done
-if [ "$bad" -eq 0 ]; then echo "ok: archives are PIC"; else ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+if [ "$bad" -eq 0 ]; then echo "ok: archives are PIC (code sections; DWARF debug relocs ignored)"; else ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 
 # Header closure: every header #include "iree/..."-ed directly by the three public
 # entry points a consumer #includes must actually exist under include/. This is the
