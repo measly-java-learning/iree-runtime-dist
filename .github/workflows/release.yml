@@ -265,6 +265,13 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Build the metadata zip (once per release; variant-independent)
+        run: |
+          mkdir -p meta-extract
+          tar -xzf release/iree-runtime-*-default-linux-x86_64.tar.gz -C meta-extract
+          prefix="$(find meta-extract -maxdepth 1 -mindepth 1 -type d)"
+          bash scripts/package-metadata.sh "$prefix" "${{ needs.setup.outputs.iree_version }}" release
+
       - name: Render release notes
         # scripts/lib/naming.sh's asset_stem/tarball_name/sha_name are the
         # single source of truth for asset filenames (scripts/package.sh and
@@ -320,11 +327,13 @@ jobs:
             release/*.tar.gz \
             release/*.sha256 \
             release/IreeRuntimePin.cmake \
+            release/iree-runtime-metadata-*.zip \
             --title "${GITHUB_REF_NAME}" \
             -F release-notes.md \
           || gh release upload "${GITHUB_REF_NAME}" \
             release/*.tar.gz \
             release/*.sha256 \
             release/IreeRuntimePin.cmake \
+            release/iree-runtime-metadata-*.zip \
             --clobber
 

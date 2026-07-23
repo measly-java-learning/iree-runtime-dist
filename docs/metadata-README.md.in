@@ -1,0 +1,61 @@
+# iree-runtime-dist metadata
+
+This is the iree-runtime-dist metadata for version @IREE_VERSION@ — a standalone, non-CMake
+snapshot of the same enriched constants and JSON Schemas shipped inside the runtime tarball's
+`share/iree-runtime-dist/`, packaged as a stable per-release asset so consumers who don't build
+with CMake (or don't want to extract a multi-hundred-MB platform tarball just to read constants)
+can fetch one small, version-pinned URL.
+
+## File inventory
+
+| File | What it is |
+|---|---|
+| `element_types.json` | `IREE_HAL_ELEMENT_TYPE_*` name → enriched properties object, generated from IREE's headers |
+| `status_codes.json` | `iree_status_code_t` name → enriched properties object, generated from IREE's headers |
+| `element_types.schema.json` | JSON Schema (2020-12) for `element_types.json` |
+| `status_codes.schema.json` | JSON Schema (2020-12) for `status_codes.json` |
+| `README.md` | this file |
+
+## Encoding
+
+Every element-type value is packed as:
+
+```
+value = (numerical_type << 24) | bit_count
+```
+
+Each `element_types.json` entry carries:
+
+- `value` — the `IREE_HAL_ELEMENT_TYPE_*` integer constant
+- `hex` — `value` formatted as `0x%08x`
+- `numerical_type` — the IREE numerical-type enum name for `value >> 24`
+- `category` — a coarse bucket derived from `numerical_type` (`opaque`, `boolean`, `integer`,
+  `float`, `complex`, `unknown`)
+- `signed` — `true` (signed), `false` (unsigned), or `null` (sign-agnostic / not applicable)
+- `bit_count` — element width in bits (`value & 0xFF`)
+
+Each `status_codes.json` entry carries:
+
+- `value` — the `iree_status_code_t` ordinal
+- `description` — an informational summary only, not a contract
+
+## What you can and cannot depend on
+
+The type **properties** in `element_types.json` — `value`, `hex`, `numerical_type`, `category`,
+`signed`, `bit_count` — are authoritative: they are generated directly from the shipped runtime's
+own headers, not transcribed by hand, and will always match the binary you paired this metadata
+with.
+
+What is **not** decided here is how those properties map onto *your own* native types. In
+particular, choosing among `INT_*` (sign-agnostic), `SINT_*` (explicitly signed), and `UINT_*`
+(explicitly unsigned) element-type families — and deciding what each maps to in your language or
+runtime (e.g. an `INT_32` value into a signed vs. unsigned 32-bit host type) — is your integration
+work. This metadata gives you the authoritative properties to make that decision correctly; it
+does not make the decision for you.
+
+## Schemas
+
+`element_types.schema.json` and `status_codes.schema.json` are JSON Schema, draft 2020-12
+(`"$schema": "https://json-schema.org/draft/2020-12/schema"`), and carry a `description` for every
+field to document its meaning in-line — validate against them directly rather than re-deriving
+field semantics from the data alone.
