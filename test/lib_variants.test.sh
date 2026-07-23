@@ -85,4 +85,27 @@ ASSERT_FAILS=$((ASSERT_FAILS + collision_fails))
 prefix_fails=$?
 ASSERT_FAILS=$((ASSERT_FAILS + prefix_fails))
 
+# --- variant matrix ---
+assert_eq "$(known_variants)" "default tsan" "known_variants lists default and tsan"
+assert_contains "$(variants_json)" '"tsan"' "variants_json includes tsan"
+assert_contains "$(variants_json)" '"default"' "variants_json includes default"
+
+# --- variant_cflags: the compiler-flag injection point (not -D cache options) ---
+assert_eq "$(variant_cflags default)" "" "default contributes no extra cflags"
+assert_contains "$(variant_cflags tsan)" "-fsanitize=thread" "tsan cflags instrument"
+assert_contains "$(variant_cflags tsan)" "-g" "tsan cflags carry debug info for symbolized frames"
+
+# --- variant_sanitizer: provenance value ---
+assert_eq "$(variant_sanitizer default)" "" "default has no sanitizer"
+assert_eq "$(variant_sanitizer tsan)" "thread" "tsan sanitizer is thread"
+
+# --- tsan is the SAME runtime capabilities as default (spec §4.2), Release kept (plan deviation) ---
+tf="$(variant_flags tsan)"
+assert_contains "$tf" "-DIREE_HAL_DRIVER_LOCAL_TASK=ON" "tsan keeps local-task"
+assert_contains "$tf" "-DIREE_HAL_DRIVER_LOCAL_SYNC=ON" "tsan keeps local-sync"
+assert_contains "$tf" "-DIREE_HAL_EXECUTABLE_LOADER_EMBEDDED_ELF=ON" "tsan keeps embedded-elf"
+# The driver/loader/tracing set MUST be identical to default -- assert it structurally:
+assert_eq "$(variant_flags tsan)" "$(variant_flags default)" "tsan runtime capabilities identical to default"
+assert_eq "$(variant_cflags tsan)" "-fsanitize=thread -g" "tsan differs from default only in cflags"
+
 exit "$ASSERT_FAILS"
