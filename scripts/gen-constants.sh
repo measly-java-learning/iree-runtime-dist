@@ -16,7 +16,8 @@ OUT_DIR="$PREFIX/share/iree-runtime-dist"
 mkdir -p "$OUT_DIR"
 
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+raw="$(mktemp -d)"
+trap 'rm -rf "$work" "$raw"' EXIT
 
 # Configure a tiny CMake project against the installed package, so the emitter
 # compiles with exactly the include dirs and defines a consumer would get.
@@ -34,5 +35,7 @@ cmake -G Ninja -B "$work/b" -S "$work" \
   -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build "$work/b" >/dev/null
 
-"$work/b/emit_constants" "$OUT_DIR/element_types.json" "$OUT_DIR/status_codes.json"
-echo "==> generated element_types.json and status_codes.json"
+"$work/b/emit_constants" "$raw/element_types.json" "$raw/status_codes.json" "$raw/numerical_types.json"
+python3 "$HERE/enrich-constants.py" \
+  "$raw/element_types.json" "$raw/status_codes.json" "$raw/numerical_types.json" "$OUT_DIR"
+echo "==> generated enriched element_types.json, status_codes.json + schemas"

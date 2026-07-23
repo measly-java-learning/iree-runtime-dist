@@ -54,12 +54,34 @@ static int emit_status_codes(const char* path) {
   return 0;
 }
 
+static int emit_numerical_types(const char* path) {
+  FILE* f = fopen(path, "w");
+  if (!f) return 1;
+  fprintf(f, "{\n");
+  int first = 1;
+#define N(sym)                                                            \
+  do {                                                                    \
+    fprintf(f, "%s  \"%s\": %llu", first ? "" : ",\n", #sym,              \
+            (unsigned long long)IREE_HAL_NUMERICAL_TYPE_##sym);           \
+    first = 0;                                                            \
+  } while (0)
+  N(UNKNOWN); N(INTEGER); N(INTEGER_SIGNED); N(INTEGER_UNSIGNED); N(BOOLEAN);
+  N(FLOAT); N(FLOAT_IEEE); N(FLOAT_BRAIN); N(FLOAT_COMPLEX);
+  N(FLOAT_8_E5M2); N(FLOAT_8_E4M3FN); N(FLOAT_8_E5M2_FNUZ);
+  N(FLOAT_8_E4M3_FNUZ); N(FLOAT_8_E8M0_FNU);
+#undef N
+  fprintf(f, "\n}\n");
+  fclose(f);
+  return 0;
+}
+
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    fprintf(stderr, "usage: emit_constants <element_types.json> <status_codes.json>\n");
+  if (argc != 4) {
+    fprintf(stderr, "usage: emit_constants <element_types.json> <status_codes.json> <numerical_types.json>\n");
     return 2;
   }
   if (emit_element_types(argv[1])) return 1;
   if (emit_status_codes(argv[2])) return 1;
+  if (emit_numerical_types(argv[3])) return 1;
   return 0;
 }
