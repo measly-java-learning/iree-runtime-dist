@@ -2,14 +2,17 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/assert.sh"
+. "$here/../scripts/lib/naming.sh"
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/assets"
 
 for v in default tsan; do
-  f="iree-runtime-3.11.0-$v-linux-x86_64.tar.gz"
-  echo "payload-$v" > "$tmp/assets/$f"
-  ( cd "$tmp/assets" && sha256sum "$f" > "$f.sha256" )
+  for p in $(known_platforms); do
+    f="iree-runtime-3.11.0-$v-$p.tar.gz"
+    echo "payload-$v-$p" > "$tmp/assets/$f"
+    ( cd "$tmp/assets" && sha256sum "$f" > "$f.sha256" )
+  done
 done
 
 bash "$here/../scripts/gen-pin.sh" "org/iree-runtime-dist" "v3.11.0-1" "3.11.0" "$tmp/assets" "$tmp/IreeRuntimePin.cmake"
