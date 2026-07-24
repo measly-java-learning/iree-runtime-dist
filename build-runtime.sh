@@ -14,6 +14,7 @@ VARIANT="default"
 PREFIX=""
 IREE_SRC=""
 BUILD_DIR=""
+PLATFORM=""
 PRINT_FLAGS=0
 
 usage() {
@@ -25,6 +26,9 @@ usage: build-runtime.sh --variant <default> --prefix <dir> --iree-src <checkout>
   --prefix       install prefix for the staged tree
   --iree-src     checkout of iree-org/iree at the target tag, with required submodules
   --build-dir    cmake build tree (default: <dirname of prefix>/iree-build-<variant>)
+  --platform     target platform token (default: host arch); one of naming.sh's
+                 known_platforms. Feeds manifest.json/BUILDINFO provenance and
+                 platform-specific source patches.
   --print-flags  print the effective cmake flags and exit; needs no source tree
 
 Env:
@@ -45,6 +49,7 @@ while [ $# -gt 0 ]; do
     --prefix)      require_value "$@"; PREFIX="$2"; shift 2 ;;
     --iree-src)    require_value "$@"; IREE_SRC="$2"; shift 2 ;;
     --build-dir)   require_value "$@"; BUILD_DIR="$2"; shift 2 ;;
+    --platform)    require_value "$@"; PLATFORM="$2"; shift 2 ;;
     --print-flags) PRINT_FLAGS=1; shift ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
@@ -74,9 +79,21 @@ if [ -z "$BUILD_DIR" ]; then
   BUILD_DIR="$(dirname "$PREFIX")/iree-build-${VARIANT}"
 fi
 
-# PLATFORMS comes from scripts/lib/naming.sh (single source of truth). This
-# recipe currently only ever produces the first (only) supported platform.
-PLATFORM="$(known_platforms | head -n1)"
+# Resolve the target platform token. It feeds manifest.json/BUILDINFO provenance
+# (via gen-manifest.sh and the @PLATFORM@ substitutions below) and the aarch64
+# source patch in Phase 1 -- so it MUST reflect the arch actually being built, not
+# a fixed list index. Default to the host arch so a bare local run is correct; CI
+# passes --platform explicitly from the build matrix. The value must be one of
+# naming.sh's known_platforms, the single source of truth for platform tokens.
+if [ -z "$PLATFORM" ]; then
+  case "$(uname -m)" in
+    x86_64)        PLATFORM="linux-x86_64" ;;
+    aarch64|arm64) PLATFORM="linux-aarch64" ;;
+    *) echo "error: unsupported host arch '$(uname -m)'; pass --platform explicitly" >&2; exit 2 ;;
+  esac
+fi
+known_platforms | grep -qx "$PLATFORM" \
+  || { echo "error: unknown --platform '$PLATFORM' (known: $(known_platforms | paste -sd' ' -))" >&2; exit 2; }
 
 # The IREE source is a bind mount owned by the invoking user, while the container
 # runs as root, so git refuses it as "dubious ownership" and every `git -C
@@ -142,6 +159,40 @@ for sm in $IREE_REQUIRED_SUBMODULES; do
     exit 2
   fi
 done
+
+# aarch64: bump both hardware interference-size constants from 64 to 128.
+#
+# WHY (aarch64 + tsan specifically): iree_task_worker_t's first field is an
+# iree_atomic_task_slist_t, whose static_assert requires
+# `sizeof(slist) < iree_hardware_constructive_interference_size`. The slist
+# embeds an iree_slim_mutex_t. On a normal build that mutex is a 4-byte futex
+# int, but under ThreadSanitizer futex.h deliberately clears IREE_RUNTIME_USE_FUTEX
+# (TSan can't instrument futex syscalls), so the mutex falls back to
+# pthread_mutex_t -- which is 48 bytes on aarch64 vs 40 on x86_64 (a glibc ABI
+# difference, not TSan padding). 48 + 8-byte head, aligned to iree_max_align_t,
+# lands sizeof(slist) at exactly 64, so `64 < 64` fails. x86_64+tsan (40+8=48)
+# and aarch64 non-tsan (4-byte futex) both pass, which is why only aarch64+tsan
+# broke. 128 restores a full cache line of headroom against a fixed ABI constant,
+# and upstream carries a TODO to test 128 anyway (atomics.h). Applied to every
+# aarch64 variant (not just tsan) to keep the shipped struct layout consistent
+# across variants; 128 also matches the real cache-line/prefetch stride of common
+# aarch64 CPUs (Graviton, Apple M-series).
+#
+# Idempotent (a re-run's sed matches nothing, the post-condition grep still
+# holds) and fail-loud (if upstream ever reformats the #define, the grep aborts
+# rather than silently shipping the unpatched 64). NOTE: mutates the caller's
+# --iree-src tree in place -- CI clones fresh each run; a local host does not, so
+# a local aarch64 checkout stays patched after the build.
+if [ "$PLATFORM" = linux-aarch64 ]; then
+  _atomics_h="$IREE_SRC/runtime/src/iree/base/internal/atomics.h"
+  for _c in destructive constructive; do
+    sed -i "s/^#define iree_hardware_${_c}_interference_size 64\$/#define iree_hardware_${_c}_interference_size 128/" \
+      "$_atomics_h"
+    grep -qx "#define iree_hardware_${_c}_interference_size 128" "$_atomics_h" \
+      || { echo "error: failed to patch iree_hardware_${_c}_interference_size to 128 in $_atomics_h (upstream layout changed?)" >&2; exit 1; }
+  done
+  echo "==> patched aarch64 interference-size constants to 128"
+fi
 
 mapfile -t FLAGS < <(effective_cmake_flags "$VARIANT")
 
