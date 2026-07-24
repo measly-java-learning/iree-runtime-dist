@@ -13,7 +13,6 @@ else echo "FAIL: manifest.json missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); e
 get() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d$2)" "$m"; }
 
 assert_eq "$(get "$m" "['schema_version']")"       "2"        "schema_version"
-assert_eq "$(get "$m" "['platform']")"             "linux-x86_64" "platform"
 assert_eq "$(get "$m" "['iree_version']")"         "3.11.0"   "iree_version"
 assert_eq "$(get "$m" "['iree_tag']")"             "v3.11.0"  "iree_tag"
 assert_eq "$(get "$m" "['iree_compile_version']")" "3.11.0"   "paired compiler version"
@@ -48,6 +47,13 @@ else echo "FAIL: BUILDINFO missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 # and tsan prefixes.
 variant="$(grep -oE '^variant=.*' "$prefix/BUILDINFO" | cut -d= -f2)"
 assert_eq "$(get "$m" "['variant']")" "$variant" "variant matches BUILDINFO"
+
+# Likewise the platform: assert manifest.json matches the prefix's own BUILDINFO
+# platform= line rather than a hard-coded token -- this test runs against every
+# platform (linux-x86_64, linux-aarch64), and both fields derive from $PLATFORM in
+# build-runtime.sh, so a mismatch means the two generated records drifted.
+platform="$(grep -oE '^platform=.*' "$prefix/BUILDINFO" | cut -d= -f2)"
+assert_eq "$(get "$m" "['platform']")" "$platform" "platform matches BUILDINFO"
 
 # sanitizer field: absent for default, "thread" for tsan (Task 3).
 san="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("sanitizer",""))' "$m")"
