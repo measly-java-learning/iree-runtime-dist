@@ -173,17 +173,25 @@ done
 # lands sizeof(slist) at exactly 64, so `64 < 64` fails. x86_64+tsan (40+8=48)
 # and aarch64 non-tsan (4-byte futex) both pass, which is why only aarch64+tsan
 # broke. 128 restores a full cache line of headroom against a fixed ABI constant,
-# and upstream carries a TODO to test 128 anyway (atomics.h). Applied to every
-# aarch64 variant (not just tsan) to keep the shipped struct layout consistent
-# across variants; 128 also matches the real cache-line/prefetch stride of common
-# aarch64 CPUs (Graviton, Apple M-series).
+# and upstream carries a TODO to test 128 anyway (atomics.h); 128 also matches
+# the real cache-line/prefetch stride of common aarch64 CPUs.
+#
+# TSAN-GATED, deliberately NOT applied to every aarch64 variant: the bump is both
+# necessary AND mutually exclusive across variants. iree_async_posix_worker_t
+# carries the opposite assert -- `sizeof(worker) >= constructive_interference_size`
+# (async/platform/posix/worker.h) -- and on a non-sanitizer build that struct is
+# exactly 64 bytes, so 128 fails it (64 >= 128). Under tsan the same struct bloats
+# past 128 (the pthread_mutex_t fallback again) so it holds. So default aarch64
+# must stay at 64 (its known-good value, which builds clean) and only tsan gets
+# 128. Gate on the thread sanitizer via variant_sanitizer so a future
+# thread-sanitized variant inherits this without another edit here.
 #
 # Idempotent (a re-run's sed matches nothing, the post-condition grep still
 # holds) and fail-loud (if upstream ever reformats the #define, the grep aborts
 # rather than silently shipping the unpatched 64). NOTE: mutates the caller's
 # --iree-src tree in place -- CI clones fresh each run; a local host does not, so
 # a local aarch64 checkout stays patched after the build.
-if [ "$PLATFORM" = linux-aarch64 ]; then
+if [ "$PLATFORM" = linux-aarch64 ] && [ "$(variant_sanitizer "$VARIANT")" = thread ]; then
   _atomics_h="$IREE_SRC/runtime/src/iree/base/internal/atomics.h"
   for _c in destructive constructive; do
     sed -i "s/^#define iree_hardware_${_c}_interference_size 64\$/#define iree_hardware_${_c}_interference_size 128/" \
