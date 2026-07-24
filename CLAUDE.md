@@ -6,8 +6,10 @@ Guidance for Claude Code working in this repository.
 
 CI infrastructure that builds the IREE **runtime** and publishes attested, hash-pinned tarballs.
 It produces *artifacts*, not a library — a build recipe plus packaging plus CI. The repo lives at
-`measly-java-learning/iree-runtime-dist`. No release has published successfully yet, so no release
-URL resolves — don't write or imply commands against one until a run has actually produced assets.
+`measly-java-learning/iree-runtime-dist`. The first successful release is `v3.11.0-10`, which
+publishes `default` and `tsan` tarballs for both `linux-x86_64` and `linux-aarch64` (plus the
+metadata zip and `IreeRuntimePin.cmake`). Release URLs under that tag resolve; earlier `v3.11.0-*`
+tags did not publish assets, so don't write or imply commands against those.
 
 Design: `docs/superpowers/specs/2026-07-19-iree-runtime-dist-design.md`.
 
