@@ -50,7 +50,7 @@ jobs:
 
   build:
     needs: setup
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       id-token: write
@@ -59,6 +59,11 @@ jobs:
       matrix:
         variant: ${{ fromJson(needs.setup.outputs.variants) }}
         platform: ${{ fromJson(needs.setup.outputs.platforms) }}
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
         with:
@@ -153,13 +158,18 @@ jobs:
     # or the IREE source -- exactly the consumer's situation. Only the extracted
     # tarball and the test/consumer harness are mounted in.
     needs: [setup, build]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     strategy:
       matrix:
         variant: ${{ fromJson(needs.setup.outputs.variants) }}
         platform: ${{ fromJson(needs.setup.outputs.platforms) }}
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
