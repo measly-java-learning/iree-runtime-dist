@@ -14,7 +14,7 @@ sha_name()     { printf '%s.sha256' "$(tarball_name "$@")"; }
 # sources this file) rather than hard-coding the list a third and fourth
 # time -- YAML can't source a shell lib directly, so it goes through a step
 # output instead.
-PLATFORMS="linux-x86_64"
+PLATFORMS="linux-x86_64 linux-aarch64"
 known_platforms() { printf '%s\n' $PLATFORMS; }
 
 # Build-image identity, keyed off the platform token above. The prebuilt

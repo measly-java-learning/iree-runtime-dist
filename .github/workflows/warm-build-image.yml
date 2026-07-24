@@ -37,10 +37,15 @@ jobs:
 
   warm:
     needs: platforms
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         platform: ${{ fromJson(needs.platforms.outputs.list) }}
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
       # Root checkout (no dist/), so tag/Dockerfile are unprefixed -- identical
