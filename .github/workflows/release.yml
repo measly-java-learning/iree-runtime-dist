@@ -222,17 +222,20 @@ jobs:
         # laundering through Docker
       - name: Lower ASLR entropy for in-container TSan (host-level, not namespaced)
         # TSan's shadow mapping needs mmap_rnd_bits low enough; the x86_64 default
-        # (32) is too high, aarch64 hosts are often already fine (18). Clamp to the
-        # runner's reported max so this can never exceed the ceiling and fail the
-        # job, and only lower (never raise) since lower is always safe for TSan.
+        # (32) is too high for it. Best-effort lower to 28: `sysctl -w` itself
+        # refuses to exceed the kernel's ceiling (that IS the clamp), so tolerate
+        # a failed write -- every case where the write is refused (value already
+        # <= 28, knob absent, ceiling below 28) is one where TSan is already fine,
+        # and a genuinely-needed-but-unset value surfaces later as an explicit
+        # TSan mapping error, not a silent pass. Do NOT read mmap_rnd_bits_max:
+        # it is absent on some hosted runners and reading it under set -e killed
+        # this step. Reads tolerate a missing knob so diagnostics never abort.
         if: matrix.variant == 'tsan'
         run: |
-          want=28
-          max=$(cat /proc/sys/vm/mmap_rnd_bits_max)
-          cur=$(cat /proc/sys/vm/mmap_rnd_bits)
-          [ "$want" -gt "$max" ] && want="$max"
-          if [ "$cur" -gt "$want" ]; then sudo sysctl -w vm.mmap_rnd_bits="$want"; fi
-          echo "vm.mmap_rnd_bits: was=$cur max=$max now=$(cat /proc/sys/vm/mmap_rnd_bits)"
+          before=$(cat /proc/sys/vm/mmap_rnd_bits 2>/dev/null || echo "<absent>")
+          sudo sysctl -w vm.mmap_rnd_bits=28 2>/dev/null || true
+          after=$(cat /proc/sys/vm/mmap_rnd_bits 2>/dev/null || echo "<absent>")
+          echo "vm.mmap_rnd_bits: before=$before after=$after (target 28; lower is safe for TSan)"
 
       - name: Consumer e2e in a clean container
         run: |
