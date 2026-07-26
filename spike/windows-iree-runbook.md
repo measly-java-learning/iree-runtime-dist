@@ -1,0 +1,371 @@
+# IREE runtime — Windows de-risking spike runbook
+
+**Goal:** answer, cheaply and manually on `winbox`, whether the IREE runtime recipe can produce a
+usable Windows artifact — before spending any CI cycles or writing a platform-add spec. This is
+reconnaissance: the deliverable is *findings*, not a shippable build.
+
+**Execution:** run each probe by hand on `winbox`. Every probe ends with a clear GO / NO-GO and a
+**"If this breaks, ask the agent"** hint that names the likely cause, so a help request starts three
+steps ahead instead of cold.
+
+**Record as you go:** open a tracking issue ("Windows platform de-risking spike") with W1/W2/W3 as a
+checklist and paste each probe's outcome under it. Per the repo's working rule, a measured unknown
+becomes tracked work — don't let a finding live only in your terminal scrollback.
+
+---
+
+## What's already known (don't re-derive)
+
+The sibling repo `executorch-runtime-dist` ran the equivalent spike and **shipped** Windows artifacts.
+Its host-orchestration lessons transfer verbatim (they're OS-level, not framework-level). Source docs
+if you want the originals: `executorch-runtime-dist/spike/windows-msvc-spike.md` and
+`executorch-runtime-dist/docs/handover-windows-static-cxx17.md`.
+
+What IREE does **not** inherit: ET's flag set, its `flatc_ep` bug, its kernel/torch findings. Those
+are ET-specific. IREE has its own analogs, which is exactly what W1–W3 surface.
+
+---
+
+## Ground rules (read once — these cost ET real debugging time)
+
+- **WSL is a trap.** Anything you run under WSL builds *Linux* — ELF, glibc — and gives a false
+  green. Every command below runs in **native Windows Git-Bash** driving **native** MSVC/CMake/Ninja.
+- **Toolchain must be on PATH via the VS dev shell.** MSVC, `cmake`, `ninja`, and `dumpbin` only
+  exist after `Launch-VsDevShell.ps1 -Arch amd64`. `python` = the project `.venv`.
+- **Single-config Ninja + MSVC, flat `-D` flags.** Do not reach for any vendor "windows" CMake
+  preset — on ET that pinned clang-cl + the multi-config VS generator and broke Ninja. Plain
+  `-G Ninja` lets CMake auto-detect `cl.exe`; that's what we want.
+- **The MSYS `/`-flag trap.** Under Git-Bash a leading `/` in a tool flag gets path-converted
+  (`/nologo` → `C:\Program Files\Git\nologo`) and silently feeds garbage. Use dash forms
+  (`-nologo -directives`) or prefix the command with `MSYS_NO_PATHCONV=1`. This can fail on *every*
+  invocation while a naive check still prints PASS.
+- **Driving over SSH:** run native tools via `cmd /c "<cmd> > log 2>&1"` then `type log` to read the
+  result. Raw stdout piped back over SSH gets CLIXML-mangled by PowerShell. If you script the
+  activation, base64 `-EncodedCommand` is the robust form.
+
+**Scope note:** this spike is the **`default` variant only** (no tsan — that's a Linux/clang concern;
+ASLR/`vm.mmap_rnd_bits` is irrelevant here). CRT choice (`/MD` vs `/MT`), `.zip` packaging, the CI
+runner, and porting `relocatability.sh` are all **out of scope** — see "Deferred" at the end.
+
+---
+
+## W0 — Prerequisites (recon, ~10 min)
+
+Confirm the toolchain and lay down an IREE source tree pinned to the version this recipe assumes.
+
+```powershell
+# In a VS dev shell (Launch-VsDevShell.ps1 -Arch amd64), confirm the tools exist:
+cl ; cmake --version ; ninja --version ; dumpbin -nologo -? ; python --version
+```
+
+IREE source — **v3.11.0, never main** (mixing a main runtime with the stable compiler is the exact
+ABI-mismatch this project exists to prevent):
+
+```bash
+# Git-Bash. Pick any path; C:/iree used throughout this runbook.
+git clone --depth 1 --branch v3.11.0 https://github.com/iree-org/iree.git /c/iree
+cd /c/iree
+# The 11 required submodules ONLY — never `--recursive` (that drags in llvm-project, 2.6 GB, unused).
+git submodule update --init --depth 1 \
+  third_party/benchmark third_party/flatcc third_party/googletest \
+  third_party/hip-build-deps third_party/hsa-runtime-headers third_party/musl \
+  third_party/printf third_party/spirv_cross third_party/tracy \
+  third_party/vulkan_headers third_party/webgpu-headers
+```
+
+> **If this breaks, ask the agent:** a submodule path that 404s or a checkout-gate error from IREE's
+> `check_submodule_init.py --runtime_only` — the authoritative list lives in
+> `scripts/lib/submodules.sh` and may have moved between IREE versions.
+
+**GO when:** all five tools report versions and the submodule init exits clean.
+
+---
+
+## W1 — Does the runtime configure + build under MSVC? (the big one)
+
+The exact flag set the Linux recipe uses, minus `-ffile-prefix-map==iree` — that's a clang/gcc flag
+MSVC rejects, and it's only a reproducibility nicety, not needed to answer "does it build." (These
+flags are `effective_cmake_flags` from `scripts/lib/variants.sh` + the fixed set in `build-runtime.sh`;
+regenerate anytime with `./build-runtime.sh --print-flags --variant default`.)
+
+```bash
+# Git-Bash, inside the activated VS dev shell.
+cmake -G Ninja -B /c/iree-build -S /c/iree \
+  -DIREE_HAL_DRIVER_DEFAULTS=OFF \
+  -DIREE_HAL_DRIVER_LOCAL_SYNC=ON \
+  -DIREE_HAL_DRIVER_LOCAL_TASK=ON \
+  -DIREE_HAL_EXECUTABLE_LOADER_DEFAULTS=OFF \
+  -DIREE_HAL_EXECUTABLE_LOADER_EMBEDDED_ELF=ON \
+  -DIREE_HAL_EXECUTABLE_LOADER_SYSTEM_LIBRARY=ON \
+  -DIREE_ENABLE_RUNTIME_TRACING=OFF \
+  -DIREE_BUILD_COMPILER=OFF \
+  -DIREE_BUILD_TESTS=OFF \
+  -DIREE_BUILD_SAMPLES=OFF \
+  -DIREE_BUILD_BINDINGS_TFLITE=OFF \
+  -DIREE_BUILD_BINDINGS_TFLITE_JAVA=OFF \
+  -DIREE_BUILD_PYTHON_BINDINGS=OFF \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DIREE_ALLOCATOR_SYSTEM=libc \
+  -DIREE_ENABLE_THREADING=ON
+
+# Go/no-go: build just the umbrella target first — it's the whole link surface a consumer sees.
+cmake --build /c/iree-build --target iree_runtime_unified
+```
+
+Notes on specific flags for Windows:
+- `-DCMAKE_POSITION_INDEPENDENT_CODE=ON` is a **harmless no-op** on MSVC (PIC/PIE is a Unix concept);
+  leave it for parity.
+- `-DBUILD_SHARED_LIBS=OFF` → static `.lib` archives, matching the Linux `.a` model. Good.
+- `-DIREE_ALLOCATOR_SYSTEM=libc` and `-DIREE_ENABLE_THREADING=ON` are portable.
+
+> **If this breaks, ask the agent:**
+> - **configure error naming a driver/loader** → an IREE HAL option that doesn't port to Windows as-is
+>   (most likely `SYSTEM_LIBRARY` loader assumptions). Paste the CMake error; the agent maps it to the
+>   flag to drop or swap.
+> - **an ExternalProject/byproduct "missing and no known rule to make it" from Ninja** → IREE's analog
+>   of ET's `flatc_ep` `.exe`-byproduct bug. Workaround pattern: build the offending sub-target
+>   directly first (e.g. `cmake --build /c/iree-build --target <dep>`), then re-run. The agent can
+>   identify the target from the error.
+> - **`cl` not found / wrong arch** → the dev shell wasn't activated `-Arch amd64` in *this* Git-Bash.
+
+**GO when:** `configure 0`, umbrella target links `0`. Record the object/lib count. **NO-GO** (and a
+genuinely valuable finding for the cost of an afternoon) if a capability flag can't produce a Windows
+runtime — capture exactly which one.
+
+---
+
+## W2 — Does install produce a coherent prefix, and do our four repairs port?
+
+This is the repo's actual reason to exist: IREE's bare install ships almost nothing
+(`EXCLUDE_FROM_ALL` on every library rule), so the recipe installs three named components and then
+applies four hand-repairs. The question here is **which of those four recur, vanish, or mutate on
+Windows.**
+
+```bash
+# Build everything (not just the umbrella), then install the three components the recipe uses.
+cmake --build /c/iree-build
+for c in IREEDevLibraries-Runtime IREEBundledLibraries IREECMakeExports; do
+  cmake --install /c/iree-build --component "$c" --prefix /c/iree-prefix
+done
+# Repair 1: the printf subdir's install never chains into the parent.
+cmake --install /c/iree-build/build_tools/third_party/printf \
+  --component IREEBundledLibraries --prefix /c/iree-prefix
+
+# Now inspect what landed:
+find /c/iree-prefix -name '*.lib' | sort
+ls /c/iree-prefix/lib/cmake/IREE/
+```
+
+Then walk the four Linux repairs and note each one's Windows status (compare against the prose in
+`build-runtime.sh` Phase 1):
+
+| Linux repair | What to check on Windows |
+|---|---|
+| **libbacktrace** (no install rule; hand-copy archive + hand-write imported target) | Does the `libbacktrace_impl` target even exist? `cmake --build /c/iree-build --target libbacktrace_impl`. IREE may use **`dbghelp`** on Windows instead → the whole repair is **N/A** (a simplification). If it exists, its path literals (`liblibbacktrace_impl.a` → `liblibbacktrace_libbacktrace.a`) are Unix `.a` names that won't port. |
+| **printf subdir install** (done above) | Did `libprintf_printf.lib` (or similar) land in `/c/iree-prefix/lib`? |
+| **`find_package(Threads)` missing from `IREERuntimeConfig.cmake`** | **NEEDED.** `grep -r 'Threads::Threads' /c/iree-prefix/lib/cmake/IREE/` shows it throughout the targets file. The same one-line `find_package(Threads)` insertion into `IREERuntimeConfig.cmake` that the Linux recipe applies is required. |
+| **missing public headers** (`scripts/install-headers.sh` walks the `#include` graph) | After install, is `iree/runtime/api.h` and its transitive includes present under `/c/iree-prefix/include`? The gap may differ on Windows. |
+
+> **If this breaks, ask the agent:**
+> - **prefix missing archives you expected** → a component name differs on Windows, or a target is
+>   `EXCLUDE_FROM_ALL` in a way the Linux install worked around differently. The agent can diff the
+>   installed manifest against the documented Linux prefix.
+> - **`liblibbacktrace_impl.a` not found** → almost certainly the dbghelp path above; confirm with the
+>   agent whether `IREE_ENABLE_LIBBACKTRACE` is off on Windows and the repair drops entirely.
+> - **archive naming (`.lib` vs `lib*.a`, no `lib` prefix)** → expected; note it. The Linux repair's
+>   hardcoded names are the thing that needs a Windows branch later, not a blocker now.
+
+**GO when:** the prefix has a populated `lib/` and `lib/cmake/IREE/`, and you've written a one-line
+verdict for each of the four repairs (ports / N-A / needs-Windows-names).
+
+---
+
+## W3 — Consumer `find_package` + link + load `add.vmfb` (the acceptance gate)
+
+Proves the export surface, compile-define propagation, and — the hardest Windows unknown — whether
+the embedded executable inside `add.vmfb` loads on Windows.
+
+**Reuse an existing `add.vmfb`.** It's IREE VM bytecode wrapping an **embedded-ELF** executable, which
+the embedded-ELF loader maps OS-independently *by design* — so the same file a Linux build produced
+should load on Windows. Grab one from a published release tarball or a local `out/` and copy it to
+winbox (e.g. `/c/add.vmfb`). Do **not** try to compile a fresh one on Windows for this spike.
+
+> **Note on the two loaders:** `add.vmfb` targets **embedded-ELF** (portable). The `SYSTEM_LIBRARY`
+> loader (which would load a `.dll` on Windows, `.so` on Linux) is *enabled* but *not exercised* by
+> this module — so W3 tests embedded-ELF portability, which is the point.
+
+The repo's `test/consumer/consumer.c` is the real consumer — copy it to winbox as
+`/c/spike-consumer/consumer.c` **unmodified**. For the spike, point `find_package` at
+**IREE's own** package (the thin `IreeRuntimeDist` wrapper is generated in a later build
+phase and isn't part of what we're de-risking). Write this `CMakeLists.txt` next to it:
+
+```cmake
+cmake_minimum_required(VERSION 3.21)
+project(iree_win_spike C)
+find_package(IREERuntime REQUIRED)
+add_executable(consumer consumer.c)
+# MSVC's default C mode predates C11 and rejects _Generic (used throughout IREE's
+# atomics headers). /std:c17 is the whole Windows delta — no source changes.
+set_source_files_properties(consumer.c PROPERTIES COMPILE_FLAGS "/std:c17")
+target_link_libraries(consumer PRIVATE iree_runtime_unified)
+```
+
+**No edits to `consumer.c`.** Keep compiling it as C. Switching it to C++ to dodge
+`_Generic` cascades into three further errors (C7555, C4576, C7560) that are artifacts of
+C++ semantics, not Windows portability problems — see the W3 findings below.
+
+```bash
+# CMake 4.x (VS 2026) does NOT search <prefix>/lib/cmake/ from CMAKE_PREFIX_PATH.
+# Use IREERuntime_DIR to point directly at the config-file directory.
+cmake -G Ninja -B /c/spike-consumer/b -S /c/spike-consumer \
+  -DIREERuntime_DIR=/c/iree-prefix/lib/cmake/IREE \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build /c/spike-consumer/b
+
+# W3b — load + run. consumer takes <add.vmfb> <driver-name>; expected output includes 11, 22, 33, 44.
+/c/spike-consumer/b/consumer.exe /c/add.vmfb local-sync
+/c/spike-consumer/b/consumer.exe /c/add.vmfb local-task
+```
+
+> **If this breaks, ask the agent:**
+> - **`find_package(IREERuntime)` can't find the config file** → CMake 4.x (VS 2026) changed its
+>   prefix-path search; `CMAKE_PREFIX_PATH` no longer reaches `lib/cmake/`. Use
+>   `-DIREERuntime_DIR=/c/iree-prefix/lib/cmake/IREE` instead (all caps `_DIR`).
+> - **`find_package(IREERuntime)` finds the config file but fails on `Threads::Threads`** → the
+>   missing `find_package(Threads)` repair (W2, repair 3). Insert `find_package(Threads REQUIRED)`
+>   into `IREERuntimeConfig.cmake` before the `include()` line.
+> - **link error: unresolved `iree_runtime_unified` / wrong target name** → grep the installed
+>   `IREETargets-*.cmake` for the real imported-target name; MSVC static import uses `IMPORTED_LOCATION`
+>   pointing at a `.lib`. Paste the targets file and the agent gives the exact `target_link_libraries`.
+> - **compile error on `iree_allocator_system()`** → the `IREE_ALLOCATOR_SYSTEM_CTL` compile-define
+>   didn't propagate through the export (a real defect W3 exists to catch, per `consumer.c`'s comment).
+> - **C2275/C2059 `iree_atomic_int32_t: expected an expression instead of a type`** → `_Generic`
+>   under MSVC's default (pre-C11) C mode. Add `COMPILE_FLAGS "/std:c17"`. Do **not** reach for
+>   `LANGUAGE CXX` — see next.
+> - **C7555 / C4576 / C7560** (designated initializers need `/std:c++20`; parenthesized type
+>   followed by an initializer list; designators must appear in declaration order) → you are
+>   compiling `consumer.c` as **C++**. All three come from the C99 compound literal at
+>   `consumer.c:73`/`:85` and vanish in C mode. Go back to `/std:c17` rather than editing the
+>   source; the acceptance gate is only meaningful if the consumer stays what a real consumer
+>   would write.
+> - **`add.vmfb` fails to load with a VM import-signature / driver-not-found error** → driver **names**
+>   not URIs (`local-sync`, not `local-sync://`); if the *load* itself fails, that's the embedded-ELF
+>   portability question answered NO — a headline finding. Capture the full `iree_status` print.
+
+**GO when:** consumer compiles, links, loads `add.vmfb`, and prints the correct sum under **both**
+drivers. That single run transitively proves the Windows export surface, define propagation, and
+executable-format portability.
+
+---
+
+## Deferred — explicitly NOT in this spike (each is its own follow-on)
+
+Naming these keeps the spike honest about what a GO does and doesn't prove. ET has shipped templates
+for the first two.
+
+- **CRT `/MD` vs `/MT`.** ET ships *both* rows (`windows-x86_64` dynamic for CPython, `-static` `/MT`
+  for the JNI DLL). Since the IREE consumer is `djl-iree-engine` (JNI), a `/MT` static row is the
+  likely production need. The linker does **not** catch a CRT mismatch (measured — clean link, no
+  `LNK4098`); verify with `dumpbin -nologo -directives <lib> | grep -i defaultlib` (expect
+  `LIBCMT/LIBCPMT` for `/MT`). Reusable: `executorch-runtime-dist/scripts/check-windows-crt.sh`,
+  `test/check_windows_crt.test.sh`. Spec templates: ET's `2026-07-18-windows-static-crt-design.md`.
+- **C++17 propagation.** ET found its headers require C++17 but *don't* export
+  `INTERFACE_COMPILE_FEATURES`, so MSVC (C++14 default) hits a hard `#error`. `consumer.c` is C-only so
+  W3 won't surface it — but any C++ consumer (the JNI shim) will. Worth a grep of IREE's headers for
+  the same unstated-standard gap before shipping.
+- **Packaging** (`.tar.gz` → almost certainly `.zip` on Windows), **provenance** (glibc floor is
+  Linux-only; UCRT is the Windows analog — do not carry `glibc_build` onto a Windows manifest), the
+  **CI runner** (`runs-on: windows-latest`, matrix `runs-on` derived from platform token), and porting
+  the **relocatability** measure/assert (ET has `test/relocatability-windows.sh` as a reference; on
+  Windows there's no RPATH/patchelf, so it's a different, lighter check).
+
+---
+
+## Findings log
+
+_(Append outcomes here as you run each probe — this section becomes the spike's deliverable.)_
+
+- **W0:** Skipped (answered by W1).
+
+- **W1: GO.** Default variant configures and builds without error using the same flags
+  minus `-ffile-prefix-map` (clang-only). `-DCMAKE_POSITION_INDEPENDENT_CODE=ON` is a
+  harmless no-op on MSVC. The umbrella target `iree_runtime_unified` links successfully.
+
+- **W2: 3 of 4 repairs needed.**
+  - **libbacktrace:** **N/A.** `cmake --build /c/iree-build --target libbacktrace_impl`
+    succeeds but CMake produces no install rule for it. IREE appears to use `dbghelp` on
+    Windows; the hand-copy + hand-write-imported-target repair is unnecessary.
+  - **printf:** **PORTS AS-IS.** The extra `cmake --install` on the printf subdirectory
+    *is* the Linux repair (`build-runtime.sh:274`) — there is nothing more to it. It is
+    required on Windows exactly as on Linux; `libprintf_printf.lib` lands in
+    `/c/iree-prefix/lib` only because of it. Dropping it would leave the export set
+    referencing an archive the prefix doesn't contain.
+  - **Threads:** **NEEDED.** `Threads::Threads` appears throughout
+    `IREETargets-Runtime.cmake`. Insert `find_package(Threads REQUIRED)` into
+    `IREERuntimeConfig.cmake` before the `include()` line — same one-line patch as Linux.
+  - **Headers:** **NEEDED.** `iree/base/allocator.h` and 10 other headers transitively
+    included from `iree/base/api.h` are missing from the prefix — the same class of gap as
+    Linux. Unblocked in the spike with a blanket
+    `cp -rn /c/iree/runtime/src/iree/* /c/iree-prefix/include/iree/`, which is a
+    **spike expedient, not a port**: it drags `.c` files and private headers into the
+    prefix, where `scripts/install-headers.sh` deliberately walks the real `#include` graph
+    and copies only what's reachable. Open question for the spec: does
+    `install-headers.sh` run unmodified on Windows?
+  - **Archive naming (measured):** every file under `<prefix>/lib` ends in `.lib` and none
+    carries a `lib` prefix — plain MSVC defaults, no surprises. Naming itself is closed. The
+    tooling that hardcodes the Unix forms still needs a branch: `test/build_smoke.sh`
+    (`lib/*.a`, `libiree_runtime_unified.a`, `libflatcc_*.a`). It fails loudly on a Windows
+    prefix rather than producing a false green. The libbacktrace repair's `.a` literals are
+    moot (repair is N/A on Windows).
+  - **`llvm-nm` on COFF (measured):** reads `iree_runtime_unified.lib` fine and emits
+    BSD 3-column output structurally identical to GNU nm. x86-64 COFF does not
+    underscore-prefix C symbols, so identifiers appear verbatim and substring matching ports
+    unchanged; undefined symbols print a blank address (2 fields) exactly as on ELF, so
+    `build_smoke.sh:283`'s `$3 == s && $2 ~ /^[TtDd]$/` still selects defined-only correctly.
+    New noise (MSVC-mangled literals `??_C@...`, absolute `@comp.id`/`@feat.00`) doesn't
+    collide with the C identifiers being matched. **Verdict: `NM=${NM:-nm}` tool swap, not a
+    rewrite.**
+
+- **W3: GO — `consumer.c` unmodified. Two build-system deltas, zero source changes.**
+
+  The consumer compiles, links, loads `add.vmfb`, and prints the correct sum under **both**
+  `local-sync` and `local-task`. This transitively proves the Windows export surface,
+  compile-define propagation, and — the headline result — that the **embedded-ELF executable
+  inside a Linux-produced `add.vmfb` loads on Windows**. That was the spike's biggest unknown
+  and it came back positive; no per-OS module rebuild is implied.
+
+  - **`/std:c17` on the consumer source.** MSVC's default C mode predates C11 and rejects
+    `_Generic`, which IREE's atomics headers use throughout (`iree_atomic_int32_t: expected an
+    expression instead of a type`). `set_source_files_properties(consumer.c PROPERTIES
+    COMPILE_FLAGS "/std:c17")` clears it. This is the entire source-language delta.
+  - **CMake 4.x config-file search.** `CMAKE_PREFIX_PATH` no longer searches
+    `<prefix>/lib/cmake/` under CMake 4.x (VS 2026). Use
+    `-DIREERuntime_DIR=<prefix>/lib/cmake/IREE` instead (all-caps `_DIR`).
+
+  **Dead end, recorded so it isn't rediscovered:** switching `consumer.c` to `LANGUAGE CXX`
+  also clears `_Generic`, but cascades into three further errors — C7555 (designated
+  initializers need `/std:c++20`), C4576 (`(Type){...}` is not C++ syntax), C7560 (C++20
+  designators must follow declaration order, and `iree_hal_buffer_params_t` declares `usage`
+  before `type`). All three originate from the single C99 compound literal at
+  `test/consumer/consumer.c:73`/`:85` and are artifacts of C++ semantics, **not** Windows
+  portability findings. Reverting to C + `/std:c17` cleared all of them at once. Per
+  CLAUDE.md, the acceptance gate is only meaningful while `consumer.c` remains exactly what a
+  real downstream consumer would write, so the C++ route should not be revived.
+
+  **THIRD-PARTY-NOTICES needs re-deriving for Windows (new, found while checking the above).**
+  `scripts/lib/linked-components.sh` is not automated — it is a hardcoded
+  `IREE_LINKED_COMPONENTS="flatcc printf libbacktrace"` plus 58 lines of prose recording how
+  that list was verified by hand; `gen-notices.sh:44` iterates it to generate the notices
+  tree. Since W2 found **libbacktrace is N/A on Windows**, a Windows artifact built with the
+  current list would ship a libbacktrace license for code that isn't in the artifact — the
+  over-claiming failure CLAUDE.md warns about, inverted. The Windows list is therefore a
+  re-derivation, not a port: confirm `flatcc` and `printf` are genuinely reachable from
+  `iree_runtime_unified`'s link closure on Windows, and establish whether `dbghelp` (system
+  DLL, likely no notice required) displaces libbacktrace outright. `llvm-nm` makes that
+  manual pass tractable — same method as the original derivation.
+
+  **Still open (deferred, unchanged):** C++17 propagation. `consumer.c` is C-only, so W3 does
+  not exercise whether IREE's headers export `INTERFACE_COMPILE_FEATURES` — the C++ consumer
+  (`djl-iree-engine`'s JNI shim) is the one that would hit ET's `#error` failure mode.
