@@ -33,8 +33,18 @@ provider happens to serve. Moving to a newer image is then a deliberate, reviewa
 a provenance diff attached, and `runs-on` is derived from the platform token rather than
 hardcoded per job.
 
-**The CI toolchain will not be the one the spike measured.** W1–W6 ran on `winbox` against
-VS 2026 / cl 19.51.36248; `windows-2022` ships VS 2022 (cl 19.4x). Nothing in the findings is
+**The CI toolchain will not be the one the spike measured.** Measured from a real
+`executorch-runtime-dist` Windows run on `windows-2022` (which already pins the same label):
+
+| | CI (`windows-2022`) | Spike (`winbox`) |
+|---|---|---|
+| Visual Studio | 2022 Enterprise, DevShell 17.14.35 | 2026, DevShell 18.8.0 |
+| MSVC toolset | 14.44.35207 | — |
+| `cl` | **19.44.35228.0** | **19.51.36248** |
+| ninja | 1.13.0 (pip) | — |
+
+ET activates via `vswhere` → `Launch-VsDevShell.ps1`, the same pattern as `winbox`'s
+`build-iree.ps1`, so the activation approach carries over unchanged. Nothing in the findings is
 expected to break, but three items were measured on the newer toolset and must be re-verified on
 the pinned image during implementation:
 
@@ -137,6 +147,22 @@ occurrences before stripping, **9 surviving `llvm-objcopy --strip-debug`**. The 
 surface, which is why they survive stripping. They are absent on Linux only because the recipe
 passes `-ffile-prefix-map==iree`.
 
+**Be precise about what this is.** These strings do **not** break relocation — the artifact
+links and runs from any directory with them present. By the assertion's own stated rationale
+(DWARF is exempt because it "does not affect whether or where the archive links"), `__FILE__`
+constants sit in the same category. The reasons to remove them are **parity with the Linux
+standard** and **not publishing the build machine's directory layout** — not functional
+correctness. This matters because it sets the fallback below: if removal turns out to be
+expensive, what we lose is parity and tidiness, not a working artifact.
+
+`executorch-runtime-dist` is the counter-example and should be read accurately. It uses **no**
+path-trimming flag and its Windows gate still reports
+`GATE PASS: windows-x86_64 artifact is relocatable AND links under MSVC` — because
+`test/relocatability-windows.sh` is a *functional* check (extract elsewhere, `find_package`,
+link, run), not a string scan. Its Windows archives almost certainly carry the same absolute
+paths; its gate does not look for them. **ET's shipped precedent therefore does not validate
+"no absolute paths in Windows archives."** It clears a lower bar, deliberately.
+
 ### The DWARF exemption does not apply and must not be widened
 
 `RELOC_ALLOW_DEBUG_PATHS` is the wrong tool three times over:
@@ -172,6 +198,30 @@ under the build tree likely need a second trim prefix.
 It is an undocumented `/d1` flag and could disappear in a future toolset. The mitigation is that
 the assertion is the backstop — if the flag stops working, the assertion fails loudly rather
 than silently shipping leaks. **Wire the Windows assertion before depending on the flag.**
+
+### Fallback policy: parity first, ET's functional gate on the first real obstacle
+
+**Target Linux parity** (`/d1trimfile:` + the string-scan assertion). **On the first genuine
+obstacle, drop to ET's functional gate** — port `test/relocatability-windows.sh` and gate on
+extract-elsewhere-and-link instead. Do not escalate, do not invent workarounds, and above all do
+not widen `RELOC_ALLOW_DEBUG_PATHS` to make the scan pass.
+
+This is pre-authorised, so the implementer switches without re-opening the design. It trips on
+any of:
+
+- `/d1trimfile:` does not work on cl 19.44 (the CI toolset), or is rejected/warned on it;
+- it works for source files but generated sources under the build tree still leak, and covering
+  them needs more than one additional trim prefix;
+- the string scan stays red for a reason that would require touching the exemption or the
+  assertion's own logic to clear.
+
+It does **not** trip on ordinary implementation friction — a wrong prefix, a quoting bug, a
+missed `.lib` case in the assertion. Those are bugs to fix, not obstacles.
+
+If the fallback is taken, record it in the spec and issue #11 with the specific failure, and
+note that Windows then holds a weaker relocatability standard than Linux — visible and
+deliberate, not silent. The `-natvis:` repair below is **not** part of the fallback: it is a
+text-file leak that reaches a consumer's link line, so it is required under either bar.
 
 ### The `-natvis:` repair
 
@@ -293,8 +343,8 @@ variant list is never hardcoded in a workflow.
 | Risk | Mitigation |
 |---|---|
 | `install-headers.sh` needs non-trivial rework | Sequenced early; rework budgeted rather than assumed away |
-| `/d1trimfile:` is undocumented and could vanish | Assertion wired first, so failure is loud, not silent |
-| CI toolchain (VS 2022) differs from the spike's (VS 2026) | Three items re-verified on the pinned image as an explicit plan task, `/d1trimfile:` first |
+| `/d1trimfile:` is undocumented, and unverified on cl 19.44 | Assertion wired first, so failure is loud; pre-authorised fallback to ET's functional gate on the first genuine obstacle |
+| CI toolchain (cl 19.44) differs from the spike's (cl 19.51) | Three items re-verified on the pinned image as an explicit plan task, `/d1trimfile:` first |
 | `windows-2022` eventually deprecates | Pin is a declared input; migration is a reviewable change with a provenance diff, not a silent drift |
 | Runner-native build is less hermetic than a container | Job-boundary isolation plus an explicit no-source-tree assertion in the consumer gate |
 | Generated sources need a second trim prefix | Implementation detail; the assertion catches it if missed |
