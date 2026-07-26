@@ -55,4 +55,23 @@ for p in $(known_platforms); do
       ;;
   esac
 done
+# container_platforms/containers_json are the filtered subset that build-image.sh
+# and warm-build-image.yml must use -- iterating known_platforms/platforms_json
+# there would call build_image_tag/build_dockerfile on windows-x86_64 and abort.
+assert_eq "$(container_platforms | tr '\n' ' ' | sed 's/ $//')" "linux-x86_64 linux-aarch64" \
+  "container_platforms excludes windows-x86_64"
+assert_contains "$(container_platforms)" "linux-x86_64"  "container_platforms includes linux-x86_64"
+assert_contains "$(container_platforms)" "linux-aarch64" "container_platforms includes linux-aarch64"
+
+assert_eq "$(containers_json)" '["linux-x86_64", "linux-aarch64"]' \
+  "containers_json emits only container platforms"
+
+# The full-list functions must stay unchanged -- release.yml still needs the
+# complete platform list, since windows-x86_64 IS a release platform even
+# though it is not a build-image platform.
+assert_eq "$(known_platforms | tr '\n' ' ' | sed 's/ $//')" "linux-x86_64 linux-aarch64 windows-x86_64" \
+  "known_platforms still lists all platforms including windows-x86_64"
+assert_eq "$(platforms_json)" '["linux-x86_64", "linux-aarch64", "windows-x86_64"]' \
+  "platforms_json still emits the full list"
+
 exit "$ASSERT_FAILS"

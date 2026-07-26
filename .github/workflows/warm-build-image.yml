@@ -24,7 +24,9 @@ jobs:
   platforms:
     # Single source of truth for the platform list, same as release.yml's setup
     # job -- so a platform added to scripts/lib/naming.sh warms without a second
-    # edit here.
+    # edit here. Only CONTAINER platforms get a build image to warm -- Windows
+    # is a release platform (release.yml uses the full platforms_json list) but
+    # not a build-image platform, so this uses containers_json instead.
     runs-on: ubuntu-latest
     outputs:
       list: ${{ steps.p.outputs.list }}
@@ -33,7 +35,7 @@ jobs:
       - id: p
         run: |
           . scripts/lib/naming.sh
-          echo "list=$(platforms_json)" >> "$GITHUB_OUTPUT"
+          echo "list=$(containers_json)" >> "$GITHUB_OUTPUT"
 
   warm:
     needs: platforms

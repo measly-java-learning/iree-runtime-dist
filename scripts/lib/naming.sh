@@ -58,3 +58,21 @@ build_dockerfile() { # <platform>, repo-relative
 platforms_json() { # JSON array, for GitHub Actions' fromJson() in a matrix
   python3 -c "import json,sys; print(json.dumps(sys.argv[1].split()))" "$PLATFORMS"
 }
+
+# Container-only subset of PLATFORMS. Anything that iterates platforms to
+# build/resolve a Docker image (scripts/build-image.sh, warm-build-image.yml)
+# must use this, not known_platforms/platforms_json -- a runner platform has
+# no Dockerfile, and build_image_tag/build_dockerfile fail loudly for one.
+# release.yml still needs the FULL list (platforms_json) since Windows IS a
+# release platform even though it is not a build-image platform; do not
+# collapse the two lists into one.
+container_platforms() {
+  for p in $(known_platforms); do
+    if [ "$(platform_toolchain "$p")" = container ]; then
+      printf '%s\n' "$p"
+    fi
+  done
+}
+containers_json() { # JSON array, container platforms only
+  python3 -c "import json,sys; print(json.dumps(sys.argv[1].split()))" "$(container_platforms | tr '\n' ' ')"
+}
