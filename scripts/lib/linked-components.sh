@@ -47,6 +47,20 @@
 #                 iree::runtime::unified never pulls in benchmark. Physically
 #                 present in out/lib (the export set installs everything), but not
 #                 linked into the shipped runtime target.
+#   musl        - REJECTED, and rejected for a third reason distinct from the two
+#                 below: it IS installed (libiree_builtins_musl_bin_libmusl.a) but
+#                 nothing references it. The archive defines 4 symbols --
+#                 iree_builtins_libmusl_create plus two embedded wasm bitcode blobs
+#                 as rodata (file_0/file_1) and a toc -- and they appear as
+#                 undefined symbols in zero other archives, including
+#                 libiree_runtime_unified.a; it is likewise absent from
+#                 iree_runtime_impl's INTERFACE_LINK_LIBRARIES closure. It is a
+#                 container for precompiled device-side builtins, not code linked
+#                 into a CPU runtime. Called out explicitly because musl IS one of
+#                 the 11 IREE_REQUIRED_SUBMODULES and IS physically present in
+#                 out/lib, so an auditor who finds the archive but no notice needs
+#                 to find the reason here. Verified identically on linux-x86_64 and
+#                 on Windows (see spike/windows-iree-runbook.md, W4).
 #   tracy, spirv_cross, vulkan_headers, webgpu-headers, hip-build-deps,
 #   hsa-runtime-headers, googletest, llvm-project - REJECTED. No archive, no
 #   symbol, in out/lib at all; confirmed absent by both `ls out/lib/*.a` and
