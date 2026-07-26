@@ -295,8 +295,10 @@ _(Append outcomes here as you run each probe — this section becomes the spike'
 
 - **W2: 3 of 4 repairs needed.**
   - **libbacktrace:** **N/A.** `cmake --build /c/iree-build --target libbacktrace_impl`
-    succeeds but CMake produces no install rule for it. IREE appears to use `dbghelp` on
-    Windows; the hand-copy + hand-write-imported-target repair is unnecessary.
+    succeeds but CMake produces no install rule for it, so the hand-copy +
+    hand-write-imported-target repair is unnecessary. (An earlier draft of this log guessed
+    IREE substitutes `dbghelp` on Windows. W4 disproved that — see below. libbacktrace is
+    dropped outright, not replaced.)
   - **printf:** **PORTS AS-IS.** The extra `cmake --install` on the printf subdirectory
     *is* the Linux repair (`build-runtime.sh:274`) — there is nothing more to it. It is
     required on Windows exactly as on Linux; `libprintf_printf.lib` lands in
@@ -366,6 +368,64 @@ _(Append outcomes here as you run each probe — this section becomes the spike'
   DLL, likely no notice required) displaces libbacktrace outright. `llvm-nm` makes that
   manual pass tractable — same method as the original derivation.
 
-  **Still open (deferred, unchanged):** C++17 propagation. `consumer.c` is C-only, so W3 does
+  **Still open (deferred, unchanged):** C++17 propagation.
+
+---
+
+## W4 — THIRD-PARTY-NOTICES re-derivation for Windows
+
+Run after the fact against the winbox prefix
+(`/c/Users/cored/workspace/iree-prefix`, 191 `.lib` archives), using the same two-step
+method `scripts/lib/linked-components.sh` documents for the Linux list: (1) transitive
+`INTERFACE_LINK_LIBRARIES` closure from `iree_runtime_impl`, (2) `nm` symbol cross-check.
+Archives were copied to a Linux host and read with `llvm-nm`, which is toolchain-independent —
+`llvm-nm` was not on winbox's PATH.
+
+`iree_runtime_unified`'s own `INTERFACE_LINK_LIBRARIES` is a generator expression delegating to
+`iree_runtime_impl`, so the closure must be rooted at `iree_runtime_impl` — same as Linux.
+
+**Result: `IREE_LINKED_COMPONENTS="flatcc printf"` for Windows** (libbacktrace drops).
+
+The closure from `iree_runtime_impl` is 72 targets, of which exactly five are non-IREE:
+
+| Entry | Verdict |
+|---|---|
+| `flatcc_parsing` | **ACCEPT** — link-reachable; 10 `flatcc_verify_*` symbols defined in `flatcc_parsing.lib` and referenced undefined from `iree_vm_bytecode_module.lib` and `iree_runtime_unified.lib`. Identical to Linux. |
+| `printf_printf` | **ACCEPT** — link-reachable; `vfctprintf`/`vsnprintf_` referenced undefined from `iree_base_base.lib` and `iree_runtime_unified.lib`. Identical to Linux. |
+| `Threads::Threads` | System dependency, not a bundled component — no notice. This is what the W2 `find_package(Threads)` repair exists to satisfy. |
+| `-natvis:C:/Users/cored/workspace/iree/runtime/iree.natvis` | Linker flag, not a component. **But see the relocatability note below.** |
+| `-pdbpagesize:32768` | Linker flag. Harmless. |
+
+**libbacktrace — REJECT, four independent confirmations:** no install rule (W2); no
+`libbacktrace*.lib` anywhere in the prefix; zero `backtrace_create_state`/`_full`/`_pcinfo`/
+`_simple`/`_syminfo` symbols across all 191 archives; and absent from `iree_base_base`'s
+`INTERFACE_LINK_LIBRARIES`, where the Linux build carries it. **It is not displaced by
+`dbghelp`** — the string `dbghelp` appears zero times in `IREETargets-Runtime.cmake`, and
+`iree_runtime_unified.lib` references no `SymInitialize`/`SymFromAddr`/`StackWalk`/
+`CaptureStackBackTrace` symbol. The symbolization path is simply not enabled in this
+configuration. Shipping a libbacktrace notice on a Windows artifact would claim a license for
+code that is not present in any form.
+
+**Also rejected (physically present in `lib/`, not link-reachable — same category as Linux's
+`benchmark` rejection):**
+- `benchmark.lib` — 4143 defined symbols, **0** referenced undefined from
+  `iree_runtime_unified.lib`. Matches the Linux finding.
+- `iree_builtins_musl_bin_libmusl.lib` — **not named in either list in
+  `linked-components.sh`**, so flagged here for a human decision. Not in the closure, 0
+  symbols referenced from unified. The archive holds one object containing only two embedded
+  wasm bitcode blobs as read-only data (`libmusl_wasm32_generic.bc`,
+  `libmusl_wasm64_generic.bc`) — precompiled builtins, not linked into the CPU runtime. Same
+  disposition as `benchmark`, but worth confirming the Linux prefix behaves identically rather
+  than assuming.
+- tracy, spirv_cross, vulkan_headers, webgpu-headers, hip-build-deps, hsa-runtime-headers,
+  googletest, llvm-project — no archive in `lib/` at all. Matches Linux.
+
+> **New relocatability finding (Windows).** The installed export set contains an absolute
+> path into the *source* tree: `-natvis:C:/Users/cored/workspace/iree/runtime/iree.natvis`, in
+> `iree_runtime_impl`'s `INTERFACE_LINK_LIBRARIES`. A consumer on any other machine gets a
+> dangling `-natvis:` flag on their link line. This is exactly the class of leak
+> `scripts/relocatability.sh` asserts against on Linux, and it means the deferred "port
+> relocatability to Windows" item is **not** merely lighter than Linux as previously assumed —
+> there is at least one real leak to repair. Not fixed here; recorded for the spec. `consumer.c` is C-only, so W3 does
   not exercise whether IREE's headers export `INTERFACE_COMPILE_FEATURES` — the C++ consumer
   (`djl-iree-engine`'s JNI shim) is the one that would hit ET's `#error` failure mode.
