@@ -499,3 +499,66 @@ header surface is untested on every platform. Consumer workaround today: include
 Two decisions this raises, both out of scope for this spike: whether to report it upstream,
 and whether the consumer gate should grow a C++ translation unit so the `_cc.h` surface is
 covered at all.
+
+---
+
+## W6 — Relocatability: the leak is far larger than `-natvis:`, and MSVC has a fix
+
+Run after W4 flagged the `-natvis:` path. **W4's "at least one real leak" materially understated
+the problem.** Measured against the winbox prefix's 191 archives:
+
+**Every archive embeds absolute build- and source-tree paths.** All 191 contain
+`C:\Users\cored\...`. Taking `iree_base_base.lib` as the sample: 22 occurrences before
+stripping, and **9 survive `llvm-objcopy --strip-debug`**. The survivors are all source paths:
+
+```
+C:\Users\cored\workspace\iree\runtime\src\iree\base\allocator.c
+C:\Users\cored\workspace\iree\runtime\src\iree\base\string_view.c
+...
+```
+
+These are `__FILE__` expansions baked in by IREE's status/assert macros — string-table content
+in the link surface, which is exactly why they survive stripping. They do **not** appear on
+Linux because the recipe passes `-ffile-prefix-map==iree`. W1 dropped that flag on Windows as
+"a clang/gcc flag MSVC rejects… only a reproducibility nicety." That was the right call for
+answering *does it build*, and the wrong assumption to carry forward: it is the direct cause of
+these leaks.
+
+### The DWARF exemption does not and must not cover this
+
+`RELOC_ALLOW_DEBUG_PATHS` is the wrong tool here, three times over:
+
+1. **It never fires on Windows.** `build-runtime.sh:417` gates it on `variant_sanitizer` being
+   non-empty. Windows is `default`-only, so it is off by construction.
+2. **It cannot see these files.** The exemption's case pattern is `*.a|*.o|*.so|*.so.*`
+   (`scripts/relocatability.sh:107`). `.lib` falls to the `*)` branch and is treated as a real
+   leak. Its tool is `objcopy`, which would need to be `llvm-objcopy` for COFF.
+3. **It should not exempt them anyway.** 9 of 22 survive stripping, so by the assertion's own
+   logic they are real. Widening the exemption to swallow them is exactly the "weaken the
+   assertion" move CLAUDE.md forbids. The exemption stays gated to sanitizer variants.
+
+### MSVC's `-ffile-prefix-map` analog works: `/d1trimfile:`
+
+Measured on cl 19.51.36248 (VS 2026), compiling a TU by absolute path as CMake/Ninja does:
+
+| Invocation | resulting `__FILE__` |
+|---|---|
+| baseline, no flag | `C:/Users/cored/trimtest/sub/foo.c` |
+| `-d1trimfile:C:\Users\cored\trimtest\` | `sub/foo.c` |
+
+Exit 0, with no warning, error, or "unrecognized flag" diagnostic.
+
+Two caveats to carry into implementation:
+
+- It **trims a prefix** rather than remapping to a token, so it yields `sub/foo.c` where Linux's
+  `-ffile-prefix-map==iree` yields `iree/...`. Relocatability only cares that the absolute path
+  is gone, but the two platforms' `__FILE__` strings will not be identical. Generated sources
+  under the build tree likely need a second trim prefix.
+- It is an **undocumented `/d1` flag** and could disappear in a future toolset. The mitigation is
+  that the relocatability assertion is the backstop: if the flag ever stops working, the
+  assertion fails loudly rather than silently shipping leaks. This argues for wiring the Windows
+  assertion *before* depending on the flag.
+
+**Net:** relocatability is the **largest** item in the Windows platform add, not the lighter
+check the Deferred section originally assumed — but the fix is prevention at compile time, not a
+post-hoc repair of 191 binaries.
