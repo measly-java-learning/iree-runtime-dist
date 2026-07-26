@@ -363,12 +363,13 @@ _(Append outcomes here as you run each probe — this section becomes the spike'
   tree. Since W2 found **libbacktrace is N/A on Windows**, a Windows artifact built with the
   current list would ship a libbacktrace license for code that isn't in the artifact — the
   over-claiming failure CLAUDE.md warns about, inverted. The Windows list is therefore a
-  re-derivation, not a port: confirm `flatcc` and `printf` are genuinely reachable from
-  `iree_runtime_unified`'s link closure on Windows, and establish whether `dbghelp` (system
-  DLL, likely no notice required) displaces libbacktrace outright. `llvm-nm` makes that
-  manual pass tractable — same method as the original derivation.
+  re-derivation, not a port. **Done — see W4 below**, which confirms `flatcc` and `printf` are
+  link-reachable on Windows and that libbacktrace is dropped outright (and *not* displaced by
+  `dbghelp`, contrary to the guess in the W2 entry above).
 
-  **Still open (deferred, unchanged):** C++17 propagation.
+  **Not exercised by W3:** C++17 propagation — `consumer.c` is C-only, so W3 never compiles a
+  line of C++ and does not test whether IREE's headers export `INTERFACE_COMPILE_FEATURES`.
+  Probed separately in **W5** below; the answer is negative (not a blocker).
 
 ---
 
@@ -426,6 +427,58 @@ code that is not present in any form.
 > dangling `-natvis:` flag on their link line. This is exactly the class of leak
 > `scripts/relocatability.sh` asserts against on Linux, and it means the deferred "port
 > relocatability to Windows" item is **not** merely lighter than Linux as previously assumed —
-> there is at least one real leak to repair. Not fixed here; recorded for the spec. `consumer.c` is C-only, so W3 does
-  not exercise whether IREE's headers export `INTERFACE_COMPILE_FEATURES` — the C++ consumer
-  (`djl-iree-engine`'s JNI shim) is the one that would hit ET's `#error` failure mode.
+> there is at least one real leak to repair. Not fixed here; recorded for the spec.
+
+---
+
+## W5 — C++17 propagation (the deferred item), and an upstream bug it exposed
+
+**Verdict: NEGATIVE — ET's failure mode does not reproduce. Not a blocker for Windows.**
+
+ET found its headers require C++17 but don't export `INTERFACE_COMPILE_FEATURES`, so MSVC
+(C++14 by default) hits a hard `#error`. The export gap is real here too — **neither** the
+Windows nor the Linux `IREETargets-Runtime.cmake` contains a single
+`INTERFACE_COMPILE_FEATURES` entry or any `cxx_std_*` value — but it is **harmless**, because
+IREE's runtime headers do not require C++17:
+
+| Probe | Result |
+|---|---|
+| `iree/runtime/api.h` as C++ at MSVC **default** standard (VS 2026, cl 19.51.36248) | **compiles, exit 0** |
+| same, Linux `g++ -std=c++14` | **compiles, exit 0** |
+
+IREE's one C++17 touchpoint is a graceful feature-detect, not a requirement —
+`native_module_packing.h:23`, `#if __has_include(<string_view>) && __cplusplus >= 201703L`,
+gates `IREE_HAVE_STD_STRING_VIEW` and degrades to `iree_string_view_t` otherwise. (Note for
+anyone re-testing: MSVC reports `__cplusplus` as `199711L` unless `/Zc:__cplusplus` is passed,
+so that block stays off even under `/std:c++17`. It degrades silently rather than erroring,
+which is the designed behavior.)
+
+So the JNI-shim consumer needs no standard-version handling from us, and adding
+`INTERFACE_COMPILE_FEATURES` to the export set is **not** required for Windows support.
+
+### Unrelated pre-existing bug found while probing: `native_module_cc.h` is not self-contained
+
+`iree/vm/native_module_packing.h` references `iree_vm_buffer_t` (8 occurrences, first at
+`:589`) but includes only `base/api.h`, `base/internal/span.h`, `vm/module.h`, `vm/ref.h`,
+`vm/stack.h` — **never `iree/vm/buffer.h`**. Any translation unit whose first IREE include is
+`iree/vm/native_module_cc.h` fails to compile.
+
+This is **not** a Windows issue, **not** a C++17 issue, and **not** an install-headers gap:
+
+- `iree/vm/buffer.h` is present in *both* prefixes — it installs fine.
+- Fails identically under MSVC at default, `/std:c++17`, and `/std:c++17 /Zc:__cplusplus`
+  (three probes, byte-identical diagnostics), so it is standard-independent.
+- **Reproduces on Linux** with `g++ -std=c++17` against `out/include`:
+  `error: 'iree_vm_buffer_t' was not declared in this scope`.
+- Adding `#include "iree/vm/buffer.h"` ahead of it compiles clean (exit 0) — confirming a
+  missing include and nothing more.
+
+It is an upstream IREE v3.11.0 header defect that **affects the currently shipping
+`v3.11.0-10` Linux artifacts**, not something Windows introduces. No test catches it because
+`test/consumer/consumer.c` is C-only and never includes a `_cc.h` header — the entire C++
+header surface is untested on every platform. Consumer workaround today: include
+`iree/vm/buffer.h` first.
+
+Two decisions this raises, both out of scope for this spike: whether to report it upstream,
+and whether the consumer gate should grow a C++ translation unit so the `_cc.h` surface is
+covered at all.
