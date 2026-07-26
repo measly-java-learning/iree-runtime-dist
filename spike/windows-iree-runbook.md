@@ -44,7 +44,7 @@ are ET-specific. IREE has its own analogs, which is exactly what W1–W3 surface
   activation, base64 `-EncodedCommand` is the robust form.
 
 **Scope note:** this spike is the **`default` variant only** (no tsan — that's a Linux/clang concern;
-ASLR/`vm.mmap_rnd_bits` is irrelevant here). CRT choice (`/MD` vs `/MT`), `.zip` packaging, the CI
+ASLR/`vm.mmap_rnd_bits` is irrelevant here). CRT choice (`/MD` vs `/MT`), packaging, the CI
 runner, and porting `relocatability.sh` are all **out of scope** — see "Deferred" at the end.
 
 ---
@@ -275,11 +275,28 @@ for the first two.
   `INTERFACE_COMPILE_FEATURES`, so MSVC (C++14 default) hits a hard `#error`. `consumer.c` is C-only so
   W3 won't surface it — but any C++ consumer (the JNI shim) will. Worth a grep of IREE's headers for
   the same unstated-standard gap before shipping.
-- **Packaging** (`.tar.gz` → almost certainly `.zip` on Windows), **provenance** (glibc floor is
-  Linux-only; UCRT is the Windows analog — do not carry `glibc_build` onto a Windows manifest), the
-  **CI runner** (`runs-on: windows-latest`, matrix `runs-on` derived from platform token), and porting
-  the **relocatability** measure/assert (ET has `test/relocatability-windows.sh` as a reference; on
-  Windows there's no RPATH/patchelf, so it's a different, lighter check).
+- **Packaging.** ~~`.tar.gz` → almost certainly `.zip` on Windows~~ — **withdrawn; this was an
+  untested assumption and it is wrong.** Windows stays `.tar.gz`. ET, which actually shipped
+  Windows artifacts, kept a single unbranched `tarball_name()` emitting `.tar.gz` and extracts
+  it on its Windows jobs via Git-Bash (`executorch-runtime-dist/.github/workflows/release.yml`,
+  the relocatability-smoke step). The one capability where the formats differ — symlink and
+  POSIX-mode fidelity — is irrelevant here: this prefix contains **zero** symlinks and ships
+  only static archives, headers, and CMake files. `tar.exe` (bsdtar) has been in-box since
+  Windows 10 1803, and every path that touches the artifact already goes through Git-Bash
+  anyway. Switching would force a branch into `naming.sh` (`tarball_name`/`sha_name`),
+  `gen-pin.sh`, two extract steps and the upload globs in `release.yml`, and
+  `test/consumer/run.sh` — five currently-unbranched paths bought with nothing but convention.
+  (The repo is not zip-averse: it already ships `iree-runtime-metadata-*.zip`. Format is per
+  artifact *kind*, not per platform.)
+- **Provenance** (glibc floor is Linux-only; UCRT is the Windows analog — do not carry
+  `glibc_build` onto a Windows manifest; note that `glibc_build` is *not* a compatibility floor
+  and must not be described as one — see CLAUDE.md and `gen-manifest.sh`'s `notes.glibc_build`),
+  the **CI runner** (`runs-on: windows-latest`, matrix `runs-on` derived from platform token;
+  Windows is runner-native rather than containerised — the Linux container exists to pin a
+  known-old compile environment and the toolchain NEVRAs, which has no Windows analog), and
+  porting the **relocatability** measure/assert (ET has `test/relocatability-windows.sh` as a
+  reference; there's no RPATH/patchelf on Windows, but W4 found a real absolute-path leak via
+  `-natvis:`, so this is not merely a lighter check).
 
 ---
 
