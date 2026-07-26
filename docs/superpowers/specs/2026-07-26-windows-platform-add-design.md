@@ -60,6 +60,10 @@ Add `platform_toolchain(<platform>)` returning `container` or `runner`. `build_i
 for a `runner` platform. One function answers "how does this platform get its toolchain," and
 the coupling stays explicit.
 
+CLAUDE.md's invariant is **reworded as part of this work** rather than left in tension with the
+code — see "CLAUDE.md updates" below for the exact replacement text and the other two passages
+that change with it.
+
 ### 2. Provenance: conditional keys, no schema bump
 
 `gen-manifest.sh` already sets `sanitizer` conditionally, with a matching conditional
@@ -225,6 +229,53 @@ the platform through. (The musl rejection note already landed separately.)
   assertion is what stops the two provenance models silently merging later.
 - `test/relocatability.test.sh` — Windows-shaped fixtures covering both the `__FILE__` case and
   the `-natvis:` text-file case.
+
+## CLAUDE.md updates (a deliverable of implementation)
+
+Three passages in CLAUDE.md assert invariants this design changes. They are **not** edited when
+this spec lands — CLAUDE.md is loaded as authoritative instruction in every session, so it must
+not describe a `platform_toolchain()` that does not yet exist. They are edited in the same change
+that introduces each mechanism, and a PR that adds the mechanism without the wording is
+incomplete.
+
+### 1. The build-image invariant (currently at CLAUDE.md:79–91)
+
+Today: "…adding an arch is a new `docker/<platform>.Dockerfile` plus a `PLATFORMS` entry,
+nothing else."
+
+Replace the invariant clause with:
+
+> Not every platform is containerised. `platform_toolchain()` in `naming.sh` classifies each
+> platform as `container` or `runner`. Container platforms (all Linux) take their toolchain from
+> `docker/<platform>.Dockerfile`, and adding one is that Dockerfile plus a `PLATFORMS` entry,
+> nothing else. Runner platforms (Windows) have no Dockerfile — the toolchain comes from a pinned
+> GitHub runner image plus a VS dev-shell activation, and `build_image_tag`/`build_dockerfile`
+> fail loudly if called for one. The container exists to pin a known-old glibc and the
+> clang/lld/ninja NEVRAs; that has no Windows analog, and a Windows container would fix none of
+> the Windows-specific problems. Pin the runner label (`windows-2022`, never `windows-latest`)
+> for the same reason the Dockerfile pins NEVRAs: `msvc_toolset` is attested provenance and must
+> not drift silently.
+
+The existing trailing sentence — that the Dockerfile is the single source of truth for the
+toolchain pins and the `glibc_build` value — must be scoped to container platforms, since a
+runner platform has neither a Dockerfile nor a `glibc_build`.
+
+### 2. The `manifest.json` provenance passage
+
+Today it describes `glibc_build` as unconditional. It must state that provenance keys are
+platform-conditional: `glibc_build` on container platforms, `msvc_toolset` + `crt` on Windows,
+each absent on the other, `schema_version` unchanged at `2`. The existing warning that
+`glibc_build` is not a compatibility floor stays as-is and gains its `crt` counterpart — with
+`/MT` the archives carry only `/DEFAULTLIB:LIBCMT` directives, so the CRT resolves at the
+consumer's final link.
+
+### 3. The variant-matrix passage
+
+Today: "Variants are single-sourced in `scripts/lib/variants.sh`: `known_variants`
+(`default tsan`)…". It must record that `known_variants` and `variants_json` take a platform
+argument, that Windows is `default`-only because TSan is clang/Linux-only, and that the
+exclusion lives in `variants.sh` rather than an `exclude:` block — keeping the rule that a
+variant list is never hardcoded in a workflow.
 
 ## Explicitly out of scope
 
