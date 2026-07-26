@@ -14,19 +14,47 @@ sha_name()     { printf '%s.sha256' "$(tarball_name "$@")"; }
 # sources this file) rather than hard-coding the list a third and fourth
 # time -- YAML can't source a shell lib directly, so it goes through a step
 # output instead.
-PLATFORMS="linux-x86_64 linux-aarch64"
+PLATFORMS="linux-x86_64 linux-aarch64 windows-x86_64"
 known_platforms() { printf '%s\n' $PLATFORMS; }
 
-# Build-image identity, keyed off the platform token above. The prebuilt
-# toolchain container is per-platform (a manylinux_2_28 base exists for each
-# arch), so the image tag and its Dockerfile are named by the SAME platform
-# string the artifact is -- one token, no drift. Adding a platform to PLATFORMS
-# plus dropping in docker/<platform>.Dockerfile is the whole change; the local
-# builder (scripts/build-image.sh), release.yml, and warm-build-image.yml all
-# derive tag and Dockerfile path from here rather than hard-coding either.
+# How a platform gets its toolchain. NOT every platform is containerised.
+#
+#   container - Linux. The toolchain comes from docker/<platform>.Dockerfile,
+#               which pins a known-old glibc and the clang/lld/ninja NEVRAs and
+#               is the single source of truth for the glibc_build value
+#               manifest.json attests to.
+#   runner    - Windows. There is no Dockerfile. The toolchain comes from a
+#               PINNED GitHub runner image (windows-2022, never windows-latest)
+#               plus a VS dev-shell activation. A Windows container would fix
+#               none of the Windows-specific problems, and pinning the label is
+#               the analog of pinning NEVRAs: msvc_toolset is attested
+#               provenance and must not drift silently.
+platform_toolchain() { # <platform>
+  case "${1:-}" in
+    linux-*)   printf 'container' ;;
+    windows-*) printf 'runner' ;;
+    *) echo "error: unknown platform '${1:-}'" >&2; return 2 ;;
+  esac
+}
+
 BUILD_IMAGE_REPO="iree-runtime-dist-build"
-build_image_tag()  { printf '%s:%s' "$BUILD_IMAGE_REPO" "$1"; }  # <platform>
-build_dockerfile() { printf 'docker/%s.Dockerfile' "$1"; }        # <platform>, repo-relative
+# Build-image identity, keyed off the platform token above -- one token, so tag,
+# Dockerfile, and artifact platform cannot drift. Defined ONLY for container
+# platforms: asking a runner platform for a build image is a programming error,
+# and returning an empty string would silently produce `docker build -f ''`.
+_require_container_platform() { # <platform> <caller>
+  if [ "$(platform_toolchain "$1")" != container ]; then
+    echo "error: $2 called for non-container platform '$1'" >&2; return 2
+  fi
+}
+build_image_tag()  { # <platform>
+  _require_container_platform "$1" build_image_tag || return 2
+  printf '%s:%s' "$BUILD_IMAGE_REPO" "$1"
+}
+build_dockerfile() { # <platform>, repo-relative
+  _require_container_platform "$1" build_dockerfile || return 2
+  printf 'docker/%s.Dockerfile' "$1"
+}
 platforms_json() { # JSON array, for GitHub Actions' fromJson() in a matrix
   python3 -c "import json,sys; print(json.dumps(sys.argv[1].split()))" "$PLATFORMS"
 }

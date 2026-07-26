@@ -15,8 +15,10 @@ WF="${1:-$REPO/.github/workflows/release.yml}"
 # The build-image Dockerfile path is no longer a literal `with: file:` -- it is
 # computed per-platform into $GITHUB_ENV (BUILD_DOCKERFILE) and passed as
 # ${{ env.BUILD_DOCKERFILE }}, which the action-path check below skips. The
-# platform list is the same single source of truth the workflow uses.
-PLATFORMS="$(. "$REPO/scripts/lib/naming.sh"; known_platforms | tr '\n' ' ')"
+# platform list is the same single source of truth the workflow uses. Only
+# container platforms have a Dockerfile at all -- runner platforms (Windows)
+# get their toolchain from a pinned CI image, not a build-push-action step.
+PLATFORMS="$(. "$REPO/scripts/lib/naming.sh"; for p in $(known_platforms); do if [ "$(platform_toolchain "$p")" = container ]; then printf '%s ' "$p"; fi; done)"
 
 python3 - "$WF" "$REPO" "$PLATFORMS" <<'PY'
 import sys, os, re, yaml

@@ -76,18 +76,28 @@ what they define, change it there, not at a call site. `effective_cmake_flags` i
 feeds the build, `--print-flags`, and `BUILDINFO`/`manifest.json` provenance, so recorded
 provenance cannot diverge from the build that produced it.
 
+Not every platform is containerised. `platform_toolchain()` in `naming.sh` classifies each
+platform as `container` or `runner`. Container platforms (all Linux) take their toolchain from
+`docker/<platform>.Dockerfile`, and adding one is that Dockerfile plus a `PLATFORMS` entry,
+nothing else. Runner platforms (Windows) have no Dockerfile — the toolchain comes from a pinned
+GitHub runner image plus a VS dev-shell activation, and `build_image_tag`/`build_dockerfile`
+fail loudly if called for one. The container exists to pin a known-old glibc and the
+clang/lld/ninja NEVRAs; that has no Windows analog, and a Windows container would fix none of
+the Windows-specific problems. Pin the runner label (`windows-2022`, never `windows-latest`)
+for the same reason the Dockerfile pins NEVRAs: `msvc_toolset` is attested provenance and must
+not drift silently.
+
 A prebuilt build image (`docker/<platform>.Dockerfile` → `iree-runtime-dist-build:<platform>`,
 built by `scripts/build-image.sh`) pins the toolchain (clang/lld/ninja NEVRAs) and saves the
 `dnf install` tax on every invocation. The image tag and its Dockerfile are both named by the
 platform token from `scripts/lib/naming.sh` (`build_image_tag`/`build_dockerfile`) — one token,
-so tag, Dockerfile, and artifact platform cannot drift; adding an arch is a new
-`docker/<platform>.Dockerfile` plus a `PLATFORMS` entry, nothing else. CI cannot pull this local
+so tag, Dockerfile, and artifact platform cannot drift. CI cannot pull this local
 image — a GH runner never sees it — so `release.yml` instead builds the per-platform Dockerfile
 itself in every job that needs it, backed by GitHub Actions' layer cache
 (`cache-from`/`cache-to: type=gha`). That cache is ref-scoped, so a separate `warm-build-image.yml`
-rebuilds it on `main` (the one scope tag runs can read) whenever the Dockerfile changes; the
-Dockerfile stays the single source of truth for the toolchain pins and the `glibc_build` value
-`manifest.json` attests
+rebuilds it on `main` (the one scope tag runs can read) whenever the Dockerfile changes; for
+container platforms, the Dockerfile stays the single source of truth for the toolchain pins and
+the `glibc_build` value `manifest.json` attests
 to, with no second copy to drift.
 
 ## Variant matrix
