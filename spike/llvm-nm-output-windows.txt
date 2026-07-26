@@ -1,0 +1,30 @@
+llvm-nm .\iree-prefix\lib\iree_runtime_unified.lib | more
+
+runtime\src\iree\vm\bytecode\utils\CMakeFiles\iree_vm_bytecode_utils_utils.objects.dir\features.c.obj:
+00000000 t $LN12
+00000000 t $LN4
+00000000 r $chain$3$iree_vm_check_feature_mismatch
+00000000 r $chain$4$iree_vm_check_feature_mismatch
+00000000 r $pdata$3$iree_vm_check_feature_mismatch
+00000000 r $pdata$4$iree_vm_check_feature_mismatch
+00000000 r $pdata$iree_vm_bytecode_features_format
+00000000 r $pdata$iree_vm_check_feature_mismatch
+00000000 r $unwind$iree_vm_bytecode_features_format
+00000000 r $unwind$iree_vm_check_feature_mismatch
+00000000 R ??_C@_05HBAAGLPB@YIELD@
+00000000 R ??_C@_06KEBCKDCK@UNWIND@
+00000000 R ??_C@_07LDOEFBGN@EXT_F32@
+00000000 R ??_C@_07ODHFDEAA@EXT_F64@
+00000000 R ??_C@_0HK@HPOKHLPG@required?5module?5features?5?$FL?$CF?4?$CKs?$FN?5@
+01048d98 a @comp.id
+80010190 a @feat.00
+         U __GSHandlerCheck
+         U __security_check_cookie
+         U __security_cookie
+00000010 r flatbuffers_end
+00000001 r flatbuffers_false
+00000008 r flatbuffers_not_found
+00000000 r flatbuffers_true
+         U iree_bitfield_format_inline
+         U iree_status_allocate_f
+00000000 T iree_vm_bytecode_available_features
