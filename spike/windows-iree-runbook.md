@@ -562,3 +562,56 @@ Two caveats to carry into implementation:
 **Net:** relocatability is the **largest** item in the Windows platform add, not the lighter
 check the Deferred section originally assumed — but the fix is prevention at compile time, not a
 post-hoc repair of 191 binaries.
+
+---
+
+## W7 — install-headers.sh on Windows
+
+**Verdict: RAN UNMODIFIED.** No repair needed.
+
+`scripts/install-headers.sh` was copied byte-for-byte (`scp`) to winbox and sourced from Git-Bash
+under `C:\Program Files\Git\bin\bash.exe` (never the WSL `bash.exe` under `System32`, which would
+build against glibc and prove nothing about this port). It uses only `grep -ohE`, `sed -E`,
+`mkdir -p`, `cp`, associative-array bash builtins, and relative `iree/...` path strings — no
+`find -path`, no `realpath`/`readlink -f`, no explicit `/` rewriting, and no case-sensitivity-
+dependent comparison, so none of the failure points the brief flagged as plausible were actually
+present in the script.
+
+One detour: the brief's Step 2 example assumed `install-headers.sh` reads `$PREFIX`/`$BUILD_DIR`
+env vars directly, but the real script only defines the `install_missing_headers` function (it's
+`source`d, matching `build-runtime.sh:397-398`) and takes `<prefix>` `<iree_src>` as positional
+args — so the probe driver sources it and calls `install_missing_headers "$PREFIX" "$IREE_SRC"`
+explicitly, mirroring the real call site.
+
+Second detour: the existing `/c/Users/cored/workspace/iree-prefix` (from the earlier manual
+spike) was **not** used as the seed for this probe. Copying its `include/` turned up 495 `.c`
+files sitting alongside 586 `.h` files — i.e. that prefix is itself contaminated by the spike's
+blanket `cp -rn` workaround the brief warns about, and starting from it would validate nothing
+(any `.c` files present beforehand would just persist untouched, since the script only fills
+gaps and never deletes). The probe instead ran `install_missing_headers` against a **fresh empty
+prefix** (`/c/Users/cored/hdr-probe`, `include/` present but empty), forcing every header in the
+closure to be freshly resolved and copied from `IREE_SRC` — a strictly harder test of the walk
+logic than the brief's "fill the gaps in an already-populated prefix" scenario, since nothing was
+pre-seeded to short-circuit the `[ -f "$dest" ]` check.
+
+Commands run on winbox (Git-Bash):
+
+```
+$ "C:\Program Files\Git\bin\bash.exe" probe_run.sh
+install-headers: header closure has 69 file(s); filled 69 missing from source
+exit=0
+H_COUNT=69
+C_COUNT=0
+api.h=present
+allocator.h=present
+```
+
+- `.h` count: **69** (all copied fresh, since the seed prefix was empty)
+- `.c` count: **0**
+- `iree/runtime/api.h`: present
+- `iree/base/allocator.h`: present
+- exit code: **0**
+
+Conclusion: the `#include`-graph walk in `install-headers.sh` is portable as written. No
+Windows-specific repair is needed for Task 2; `scripts/install-headers.sh` is unchanged in this
+commit.
