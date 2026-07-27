@@ -86,9 +86,9 @@ prefix_fails=$?
 ASSERT_FAILS=$((ASSERT_FAILS + prefix_fails))
 
 # --- variant matrix ---
-assert_eq "$(known_variants)" "default tsan" "known_variants lists default and tsan"
-assert_contains "$(variants_json)" '"tsan"' "variants_json includes tsan"
-assert_contains "$(variants_json)" '"default"' "variants_json includes default"
+assert_eq "$(known_variants linux-x86_64)" "default tsan" "known_variants lists default and tsan"
+assert_contains "$(variants_json linux-x86_64)" '"tsan"' "variants_json includes tsan"
+assert_contains "$(variants_json linux-x86_64)" '"default"' "variants_json includes default"
 
 # --- variant_cflags: the compiler-flag injection point (not -D cache options) ---
 assert_eq "$(variant_cflags default)" "" "default contributes no extra cflags"
@@ -107,5 +107,19 @@ assert_contains "$tf" "-DIREE_HAL_EXECUTABLE_LOADER_EMBEDDED_ELF=ON" "tsan keeps
 # The driver/loader/tracing set MUST be identical to default -- assert it structurally:
 assert_eq "$(variant_flags tsan)" "$(variant_flags default)" "tsan runtime capabilities identical to default"
 assert_eq "$(variant_cflags tsan)" "-fsanitize=thread -g" "tsan differs from default only in cflags"
+
+# TSan is clang/Linux-only. The release matrix is a full variant x platform
+# cross-product, so if this list were platform-independent the matrix would
+# schedule an unbuildable tsan/windows job. The exclusion lives HERE, not in an
+# exclude: block, because a variant list is never hardcoded in a workflow.
+assert_eq "$(known_variants linux-x86_64)"   "default tsan" "linux-x86_64 builds both variants"
+assert_eq "$(known_variants linux-aarch64)"  "default tsan" "linux-aarch64 builds both variants"
+assert_eq "$(known_variants windows-x86_64)" "default"      "windows-x86_64 is default-only (no clang TSan)"
+
+assert_eq "$(variants_json linux-x86_64)"   '["default", "tsan"]' "variants_json linux"
+assert_eq "$(variants_json windows-x86_64)" '["default"]'         "variants_json windows"
+
+known_variants bogus-platform >/dev/null 2>&1
+assert_eq "$?" "2" "known_variants rejects an unknown platform"
 
 exit "$ASSERT_FAILS"

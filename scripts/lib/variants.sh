@@ -49,6 +49,21 @@ variant_sanitizer() { # <variant>
   esac
 }
 
-known_variants() { printf 'default tsan'; }
+# Which variants a platform builds. NOT platform-independent: tsan is
+# -fsanitize=thread under clang, which the MSVC/Windows toolchain does not
+# provide. release.yml fans out a full variant x platform cross-product, so
+# without this a windows tsan job would be scheduled and fail. The exclusion
+# lives here rather than in an `exclude:` block because a variant list is never
+# hardcoded in a workflow -- YAML can't source this file, so it goes through the
+# setup job's step output instead.
+known_variants() { # <platform>
+  case "${1:-}" in
+    linux-*)   printf 'default tsan' ;;
+    windows-*) printf 'default' ;;
+    *) echo "error: unknown platform '${1:-}'" >&2; return 2 ;;
+  esac
+}
 
-variants_json() { python3 -c "import json,sys; print(json.dumps(sys.argv[1].split()))" "$(known_variants)"; }
+variants_json() { # <platform>, JSON array for GitHub Actions' fromJson()
+  python3 -c "import json,sys; print(json.dumps(sys.argv[1].split()))" "$(known_variants "$1")"
+}

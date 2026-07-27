@@ -102,12 +102,18 @@ to, with no second copy to drift.
 
 ## Variant matrix
 
-Variants are single-sourced in `scripts/lib/variants.sh`: `known_variants` (`default tsan`),
-`variants_json` (feeds the release matrix's `fromJson()` fan-out, mirroring how `naming.sh` feeds
-the platform matrix), `variant_cflags` (extra `CMAKE_C_FLAGS`/`CXX_FLAGS`, not a `-D` cache
-option), and `variant_sanitizer` (the `sanitizer` value recorded in `manifest.json`/`BUILDINFO`).
-Never hardcode a variant list anywhere else — CI's `build`/`verify` jobs source it, and a new
-variant (e.g. a future `tracy`) is a `variants.sh` change, not a workflow edit.
+Variants are single-sourced in `scripts/lib/variants.sh`: `known_variants <platform>` and
+`variants_json <platform>` (feeds the release matrix's `fromJson()` fan-out, mirroring how
+`naming.sh` feeds the platform matrix), `variant_cflags` (extra `CMAKE_C_FLAGS`/`CXX_FLAGS`, not a
+`-D` cache option), and `variant_sanitizer` (the `sanitizer` value recorded in
+`manifest.json`/`BUILDINFO`). `known_variants`/`variants_json` are platform-aware, not just
+platform-parameterized: `linux-*` builds `default tsan`, but `windows-*` builds `default` only —
+TSan is `-fsanitize=thread` under clang, which the MSVC toolchain does not provide, and the
+release matrix is a full variant × platform cross-product, so a platform-independent list would
+schedule an unbuildable `tsan`/`windows-x86_64` job. That exclusion lives in `variants.sh` rather
+than a workflow `exclude:` block, for the same single-source-of-truth reason as the rest of this
+section: a variant list is never hardcoded in a workflow, and a new variant (e.g. a future
+`tracy`) is a `variants.sh` change, not a workflow edit.
 
 `default` and `tsan` share `_runtime_capability_flags` (drivers, loaders, tracing-off) so the two
 cannot drift apart on capability — they differ **only** in `variant_cflags`: empty for `default`,

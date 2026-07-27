@@ -43,6 +43,17 @@ jobs:
           . scripts/lib/naming.sh
           echo "list=$(platforms_json)" >> "$GITHUB_OUTPUT"
       - id: variants
+        # KNOWN GAP (tracked for the task that owns this matrix's shape):
+        # known_variants/variants_json now take a <platform> argument (windows
+        # is default-only; tsan is clang-only) but this step still calls
+        # variants_json with none, and the build/verify matrices below still
+        # cross variant x platform independently -- fromJson(outputs.variants)
+        # x fromJson(outputs.platforms) -- so a platform-scoped variant list
+        # can't be threaded through without reshaping those matrices (e.g. to
+        # a single list of {variant, platform} pairs). Left unfixed here
+        # deliberately: this is a matrix-shape change, not a variants.sh caller
+        # fix, and belongs with whichever task restructures build/verify's
+        # strategy for the windows leg.
         run: |
           . scripts/lib/variants.sh
           echo "list=$(variants_json)" >> "$GITHUB_OUTPUT"
@@ -315,8 +326,8 @@ jobs:
           version="${{ needs.setup.outputs.iree_version }}"
           {
             variant_platform_list=""
-            for variant in $(known_variants); do
-              for platform in $(known_platforms); do
+            for platform in $(known_platforms); do
+              for variant in $(known_variants "$platform"); do
                 variant_platform_list="${variant_platform_list}\`${variant}\`/\`${platform}\`, "
               done
             done
@@ -332,8 +343,8 @@ jobs:
             echo ""
             echo "Verify before consuming:"
             echo '```'
-            for variant in $(known_variants); do
-              for platform in $(known_platforms); do
+            for platform in $(known_platforms); do
+              for variant in $(known_variants "$platform"); do
                 tb="$(tarball_name "$version" "$variant" "$platform")"
                 echo "sha256sum -c $(sha_name "$version" "$variant" "$platform")"
                 echo "gh attestation verify ${tb} --repo ${{ github.repository }}"

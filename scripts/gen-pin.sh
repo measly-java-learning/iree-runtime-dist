@@ -27,8 +27,8 @@ OUTFILE="${5:?outfile required}"
   echo "# returns, so unused variants download nothing:"
   echo "#   iree_runtime_dist_url(\"\${IREE_RUNTIME_VARIANT}\" \"\${platform}\" url sha)"
   echo ""
-  for variant in $(known_variants); do
-    for platform in $PLATFORMS; do
+  for platform in $PLATFORMS; do
+    for variant in $(known_variants "$platform"); do
       tb="$(tarball_name "$VERSION" "$variant" "$platform")"
       shafile="$ASSETS/$(sha_name "$VERSION" "$variant" "$platform")"
       [ -f "$shafile" ] || { echo "error: missing sha file $shafile" >&2; exit 1; }
