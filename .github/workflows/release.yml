@@ -2,15 +2,6 @@ name: release
 on:
   push:
     tags: ['v*-*']          # v<iree-version>-<pkgrev>, e.g. v3.11.0-1
-    # TEMPORARY (Task 12c trial run) -- REMOVE before this branch merges; it is
-    # reverted at the end of 12c and must never reach main. It exercises the
-    # build job on this feature branch WITHOUT minting a release tag: a tag cut
-    # off a branch about to be rebased/squashed would publish real assets and
-    # outlive the branch. workflow_dispatch is not an option -- it only
-    # registers from the default branch. Publication is made structurally
-    # impossible from a branch push by the `if: startsWith(github.ref,
-    # 'refs/tags/')` guards on the pin and release jobs below.
-    branches: ['feat/windows-platform-add']
 
 permissions:
   contents: read
@@ -38,19 +29,7 @@ jobs:
         # `bash --noprofile --norc -eo pipefail {0}`, so the pipeline's exit
         # status is the failure of any stage, not just the last.
         shell: bash
-        run: |
-          # TEMPORARY (Task 12c trial run) -- REVERTED together with the branch
-          # trigger above. On a tag push this is byte-for-byte the original
-          # one-liner. On a branch push GITHUB_REF_NAME is a branch name, which
-          # derive-version.sh correctly rejects, so substitute a placeholder
-          # tag purely so the build job can run. The placeholder can never
-          # reach a published asset name: pin and release are gated to tag refs.
-          ref="${GITHUB_REF_NAME}"
-          case "${GITHUB_REF}" in
-            refs/tags/*) ;;
-            *) ref="v3.11.0-0" ;;
-          esac
-          bash scripts/derive-version.sh "$ref" | tr 'A-Z' 'a-z' >> "$GITHUB_OUTPUT"
+        run: bash scripts/derive-version.sh "${GITHUB_REF_NAME}" | tr 'A-Z' 'a-z' >> "$GITHUB_OUTPUT"
       - id: submodules
         run: |
           . scripts/lib/submodules.sh
@@ -297,14 +276,7 @@ jobs:
             "${{ needs.setup.outputs.iree_version }}" \
             "${{ matrix.variant }}" "${{ matrix.platform }}" assets
 
-      # TEMPORARY (Task 12c trial run) -- REVERTED with the branch trigger.
-      # An attestation is a repo write, and a branch-push build would register
-      # one for a subject FILENAME identical to a real future release asset but
-      # with a different digest. That is provenance pollution, so the trial
-      # does not produce one. Gap this leaves open, for 12d: actions/attest has
-      # not yet been observed running on a windows runner.
       - uses: actions/attest@v4
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           subject-path: dist/assets/*.tar.gz
 
@@ -416,13 +388,6 @@ jobs:
             '
 
   pin:
-    # TEMPORARY (Task 12c trial run) -- REVERTED with the branch trigger above.
-    # This is the guard that makes publication from a branch push structurally
-    # impossible rather than merely unlikely: pin is the only producer of
-    # IreeRuntimePin.cmake, and release (which is the only job with
-    # contents: write) needs it. On a tag push the condition is true and the
-    # graph is unchanged.
-    if: startsWith(github.ref, 'refs/tags/')
     needs: [setup, verify]
     runs-on: ubuntu-latest
     permissions:
@@ -444,12 +409,6 @@ jobs:
           path: IreeRuntimePin.cmake
 
   release:
-    # TEMPORARY (Task 12c trial run) -- REVERTED with the branch trigger above.
-    # Independent of the pin guard on purpose: this is the ONLY job that holds
-    # contents: write and the only one that creates a release or uploads an
-    # asset, so it carries its own tag-ref condition rather than relying on a
-    # `needs:` edge staying intact.
-    if: startsWith(github.ref, 'refs/tags/')
     needs: [setup, verify, pin]
     runs-on: ubuntu-latest
     permissions:
