@@ -44,8 +44,17 @@ relocatability_repair() { # <prefix>
     # drop the whole property line (harmless no-op set_target_properties
     # argument otherwise, but this keeps output tidy and the repair
     # idempotent -- a second pass finds nothing left to strip).
+    # The absolute form is platform-dependent and BOTH must be matched. A
+    # POSIX leak is "-I/iree/third_party/flatcc/include/"; the Windows one is
+    # "-ID:/a/.../iree/third_party/flatcc/include/", which the POSIX-only
+    # pattern (-I followed by "/") silently does not match. Measured in the
+    # first real Windows artifact (run 30284606833): the flatcc -I entries
+    # survived into the shipped IREETargets-Runtime.cmake precisely because of
+    # this, so a consumer's compile line would carry a D:\ path from the CI
+    # runner. Only ABSOLUTE -I flags are stripped -- a relative one is not a
+    # build-machine path and is left alone.
     find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
-      | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS/s#-I/[^;"]*;?##g'
+      | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS/s#-I([A-Za-z]:)?[\\/][^;"]*;?##g'
     find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
       | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS[[:space:]]*""[[:space:]]*$/d'
 
@@ -87,6 +96,20 @@ relocatability_repair() { # <prefix>
 }
 
 # Fails loudly, listing every offender. Never narrow this to "just lib/cmake".
+#
+# KNOWN GAP, WINDOWS (measured, not theoretical -- see the Task 12c report):
+# build-runtime.sh passes container/runner-internal paths as needles, which on
+# a Windows runner are the POSIX forms Git-Bash uses (/d/a/...). Everything
+# cmake and cl.exe bake into the artifact is Windows-form (D:\... or D:/...),
+# so those needles match nothing and this assertion currently passes on
+# Windows without proving anything. Adding the Windows-form needles is the
+# right fix, but it does not stand alone: the first real Windows artifact
+# (run 30284606833) carried a build-dir path in 191 of 191 COFF archives,
+# because lib.exe canonicalises each member name to a full path even when
+# ninja hands it a relative one. That needs its own remedy (an archiver that
+# preserves relative member names, or a post-pass over the member-name string
+# table) before the assertion can be widened without failing every build.
+# Do NOT "fix" this by leaving the needles POSIX-only and calling it covered.
 relocatability_assert() { # <prefix> <build_path> <src_path> [extra_needle...]
   local prefix="${1:?prefix required}" build="${2:?build path required}" src="${3:?src path required}"
   shift 3

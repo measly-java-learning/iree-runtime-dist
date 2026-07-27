@@ -121,6 +121,44 @@ esac
 assert_contains "$got_flatcc" '-lm' "sibling INTERFACE_LINK_LIBRARIES property untouched"
 assert_contains "$got_flatcc" 'iree_schemas_webgpu_executable_def_c_fbs' "target definition untouched"
 
+# Same leak, Windows form. This is not hypothetical: the first real Windows
+# artifact (run 30284606833) shipped
+#   -ID:/a/iree-runtime-dist/iree-runtime-dist/iree/third_party/flatcc/include/
+# in IREETargets-Runtime.cmake, because the repair's pattern required the
+# character after -I to be "/" and a Windows absolute path starts with a drive
+# letter. relocatability_assert did not catch it either: on Windows it is
+# invoked with POSIX-form needles (/d/a/...) while everything cmake and cl bake
+# in is Windows-form.
+flatcc_win="$(mktemp -d)"
+mkdir -p "$flatcc_win/lib/cmake/IREE"
+cat > "$flatcc_win/lib/cmake/IREE/IREETargets-Runtime.cmake" <<'EOF'
+set_target_properties(iree_schemas_webgpu_executable_def_c_fbs PROPERTIES
+  INTERFACE_COMPILE_OPTIONS "-ID:/a/iree-runtime-dist/iree-runtime-dist/iree/third_party/flatcc/include/;-ID:/a/iree-runtime-dist/iree-runtime-dist/iree/third_party/flatcc/include/flatcc/reflection/"
+  INTERFACE_LINK_LIBRARIES "-pdbpagesize:32768"
+)
+EOF
+relocatability_repair "$flatcc_win"
+got_flatcc_win="$(cat "$flatcc_win/lib/cmake/IREE/IREETargets-Runtime.cmake")"
+case "$got_flatcc_win" in
+  *'D:/a/'*|*'D:\a\'*)
+    echo "FAIL: windows-form flatcc -I path should be stripped" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)) ;;
+  *) echo "ok: windows-form flatcc -I path stripped" ;;
+esac
+assert_contains "$got_flatcc_win" '-pdbpagesize:32768' "windows sibling link property untouched"
+
+# A RELATIVE -I is not a build-machine path and must survive: the broadened
+# pattern must not turn into "strip every -I".
+flatcc_rel="$(mktemp -d)"
+mkdir -p "$flatcc_rel/lib/cmake/IREE"
+cat > "$flatcc_rel/lib/cmake/IREE/IREETargets-Runtime.cmake" <<'EOF'
+set_target_properties(t PROPERTIES
+  INTERFACE_COMPILE_OPTIONS "-Iinclude/flatcc"
+)
+EOF
+relocatability_repair "$flatcc_rel"
+assert_contains "$(cat "$flatcc_rel/lib/cmake/IREE/IREETargets-Runtime.cmake")" \
+  '-Iinclude/flatcc' "relative -I option left untouched"
+
 if relocatability_assert "$flatcc_tmp" "/work/iree-build-default" "/iree" >/dev/null 2>&1; then
   echo "ok: flatcc-leak prefix passes assertion after repair"
 else echo "FAIL: flatcc-leak prefix should pass assertion after repair" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
