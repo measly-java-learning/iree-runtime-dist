@@ -588,13 +588,14 @@ spike) was **not** used as the seed for this probe. Copying its `include/` turne
 files sitting alongside 586 `.h` files — i.e. that prefix is itself contaminated by the spike's
 blanket `cp -rn` workaround the brief warns about, and starting from it would validate nothing
 (any `.c` files present beforehand would just persist untouched, since the script only fills
-gaps and never deletes). The probe instead ran `install_missing_headers` against a **fresh empty
-prefix** (`/c/Users/cored/hdr-probe`, `include/` present but empty), forcing every header in the
-closure to be freshly resolved and copied from `IREE_SRC` — a strictly harder test of the walk
-logic than the brief's "fill the gaps in an already-populated prefix" scenario, since nothing was
-pre-seeded to short-circuit the `[ -f "$dest" ]` check.
+gaps and never deletes). That prefix is scratch from a manual session, not a build output this
+plan owns, and was left untouched. The probe instead ran `install_missing_headers` against a
+**fresh empty prefix** (`/c/Users/cored/hdr-probe`, `include/` present but empty), forcing every
+header in the closure to be freshly resolved and copied from `IREE_SRC` — a strictly harder test
+of the walk logic than the brief's "fill the gaps in an already-populated prefix" scenario, since
+nothing was pre-seeded to short-circuit the `[ -f "$dest" ]` check.
 
-Commands run on winbox (Git-Bash):
+**Run 1 — fresh empty prefix (copy path):**
 
 ```
 $ "C:\Program Files\Git\bin\bash.exe" probe_run.sh
@@ -612,6 +613,34 @@ allocator.h=present
 - `iree/base/allocator.h`: present
 - exit code: **0**
 
-Conclusion: the `#include`-graph walk in `install-headers.sh` is portable as written. No
-Windows-specific repair is needed for Task 2; `scripts/install-headers.sh` is unchanged in this
-commit.
+The copy path alone leaves the `[ -f "$dest" ]` **already-installed skip branch** unexercised —
+every one of the 69 headers hit the `cp` side of that check, none hit the skip side. That branch
+is the one most exposed to Windows path and case-sensitivity quirks (it's a filesystem existence
+test against a path string built by the script itself, not by an `ls`/`find` that could disagree
+case-wise), so it's the one most worth measuring, not just reasoning about.
+
+**Run 2 — same populated prefix, re-run without wiping it (skip path):**
+
+```
+$ "C:\Program Files\Git\bin\bash.exe" probe_rerun.sh
+pre-rerun H_COUNT=69
+pre-rerun C_COUNT=0
+install-headers: header closure has 69 file(s); filled 0 missing from source
+exit=0
+H_COUNT=69
+C_COUNT=0
+api.h=present
+allocator.h=present
+```
+
+All 69 headers already present in `$PREFIX/include` from Run 1; the script's own summary line
+reports `filled 0 missing from source` — every one of the 69 took the `[ -f "$dest" ]` skip
+branch this time, none were re-copied. `.h` count unchanged at 69 (a higher count would mean
+re-copy, a lower one would mean something got removed), `.c` count still 0, exit 0, both required
+headers still present.
+
+Conclusion: the `#include`-graph walk in `install-headers.sh` is portable as written, **and** the
+already-installed skip branch — the one most exposed to Windows-specific path/case quirks — was
+directly exercised and is idempotent on this platform: re-running against an already-populated
+prefix neither re-copies nor drops anything. No Windows-specific repair is needed for Task 2;
+`scripts/install-headers.sh` is unchanged in this commit.
