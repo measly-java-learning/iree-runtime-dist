@@ -122,4 +122,24 @@ assert_eq "$(variants_json windows-x86_64)" '["default"]'         "variants_json
 known_variants bogus-platform >/dev/null 2>&1
 assert_eq "$?" "2" "known_variants rejects an unknown platform"
 
+# No-argument calls must fail LOUDLY (non-zero exit, no stdout), not swallow
+# the failure. variants_json used to inline `$(known_variants "$1")` as a
+# bare argument to python3 -- a failing command substitution used that way
+# discards its exit status, so an unset $1 produced an "unbound variable"
+# message on stderr while still printing `[]` on stdout and returning 0.
+# release.yml's setup job would have emitted `list=[]`, and the build/verify
+# matrices fan out over that array -- a release run reporting success having
+# built and published nothing. Assert BOTH the exit status and that nothing
+# was printed on stdout: a test that only checked stderr text would still
+# pass if the function kept emitting `[]`.
+known_variants_noarg_out="$(known_variants 2>/dev/null)"
+known_variants_noarg_status=$?
+assert_eq "$known_variants_noarg_status" "2" "known_variants with no platform fails loudly"
+assert_eq "$known_variants_noarg_out" "" "known_variants with no platform prints nothing on stdout"
+
+variants_json_noarg_out="$(variants_json 2>/dev/null)"
+variants_json_noarg_status=$?
+assert_eq "$variants_json_noarg_status" "2" "variants_json with no platform fails loudly"
+assert_eq "$variants_json_noarg_out" "" "variants_json with no platform prints nothing on stdout"
+
 exit "$ASSERT_FAILS"

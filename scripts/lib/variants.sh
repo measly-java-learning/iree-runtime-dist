@@ -65,5 +65,14 @@ known_variants() { # <platform>
 }
 
 variants_json() { # <platform>, JSON array for GitHub Actions' fromJson()
-  python3 -c "import json,sys; print(json.dumps(sys.argv[1].split()))" "$(known_variants "$1")"
+  # Do not inline `$(known_variants "$1")` as a bare argument: a failing
+  # command substitution used that way discards its exit status (bash only
+  # honors set -e / an explicit check on a command substitution's status when
+  # it's the target of an assignment), so an unknown/missing platform would
+  # silently collapse to `[]` instead of failing loudly -- exactly the release
+  # matrix reducing to zero jobs while `setup` reports success. Capture into a
+  # variable and check explicitly instead.
+  local list
+  list="$(known_variants "${1:-}")" || return 2
+  python3 -c "import json,sys; print(json.dumps(sys.argv[1].split()))" "$list"
 }

@@ -43,17 +43,20 @@ jobs:
           . scripts/lib/naming.sh
           echo "list=$(platforms_json)" >> "$GITHUB_OUTPUT"
       - id: variants
-        # KNOWN GAP (tracked for the task that owns this matrix's shape):
-        # known_variants/variants_json now take a <platform> argument (windows
-        # is default-only; tsan is clang-only) but this step still calls
-        # variants_json with none, and the build/verify matrices below still
-        # cross variant x platform independently -- fromJson(outputs.variants)
-        # x fromJson(outputs.platforms) -- so a platform-scoped variant list
+        # KNOWN GAP, EXPECTED TO FAIL until the task that reshapes this
+        # matrix (Task 12) lands: known_variants/variants_json now take a
+        # <platform> argument (windows is default-only; tsan is clang-only),
+        # but this step still calls variants_json with none, and the
+        # build/verify matrices below still cross variant x platform
+        # independently -- fromJson(outputs.variants) x
+        # fromJson(outputs.platforms) -- so a platform-scoped variant list
         # can't be threaded through without reshaping those matrices (e.g. to
-        # a single list of {variant, platform} pairs). Left unfixed here
-        # deliberately: this is a matrix-shape change, not a variants.sh caller
-        # fix, and belongs with whichever task restructures build/verify's
-        # strategy for the windows leg.
+        # a single list of {variant, platform} pairs). variants_json now
+        # fails loudly (non-zero, no stdout) on a missing platform rather
+        # than silently emitting `[]`, so THIS STEP WILL FAIL the run until
+        # that reshaping happens -- a loud failure on a half-migrated branch
+        # is the correct state, not a bug to silence by passing a placeholder
+        # platform here.
         run: |
           . scripts/lib/variants.sh
           echo "list=$(variants_json)" >> "$GITHUB_OUTPUT"
