@@ -117,6 +117,20 @@ elif [ -n "$IREE_SRC" ]; then
   fi
   TRIMFILE_FLAG="/d1trimfile:${_trimfile_src}\\"
   COMPILER_FLAGS="$TRIMFILE_FLAG${VARIANT_CFLAGS:+ $VARIANT_CFLAGS}"
+
+  # This script runs under Git-Bash (MSYS2) on Windows, and MSYS2 rewrites
+  # arguments that LOOK like POSIX paths into Windows paths before handing them
+  # to a native .exe. That is exactly what makes `-S /d/a/.../iree` work for
+  # cmake.exe below -- but it also mangles `-DCMAKE_C_FLAGS=/d1trimfile:...`,
+  # because the value after `=` starts with `/`: MSYS2 would prefix the Git
+  # installation root onto it (`C:/Program Files/Git/d1trimfile:...`), which cl
+  # then rejects as an unknown option (and which contains spaces, so it breaks
+  # the command line as well). Excluding ONLY these two argument prefixes keeps
+  # the conversion that the path arguments genuinely need while leaving the
+  # MSVC flag string byte-identical to what --print-flags reports. Do not widen
+  # this to MSYS_NO_PATHCONV/'*': that would also stop converting -S/-B/
+  # -DCMAKE_INSTALL_PREFIX, and cmake.exe cannot resolve a /d/a/... path.
+  export MSYS2_ARG_CONV_EXCL='-DCMAKE_C_FLAGS=;-DCMAKE_CXX_FLAGS='
 else
   # --print-flags is documented to need no source tree, so IREE_SRC may be
   # empty here. A /d1trimfile: with an EMPTY prefix trims nothing -- every
@@ -254,13 +268,28 @@ fi
 
 mapfile -t FLAGS < <(effective_cmake_flags "$VARIANT" "$PLATFORM")
 
+# The compiler is chosen by the platform's toolchain class, not hardcoded.
+# Container platforms get the clang/lld the Dockerfile pins (naming a compiler
+# explicitly is what keeps a stray gcc on the image from being picked up).
+# Runner platforms (Windows) get MSVC: `cl` for both languages, resolved from
+# the activated VS dev shell that release.yml enters before invoking this
+# script. Asking for clang there would either not resolve at all or -- worse --
+# pick up the LLVM that ships alongside VS and silently build with a different
+# toolchain than the msvc_toolset value manifest.json attests to.
+if [ "$(platform_toolchain "$PLATFORM")" = container ]; then
+  TOOLCHAIN_ARGS=(-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++)
+else
+  command -v cl >/dev/null 2>&1 \
+    || { echo "error: cl is not on PATH -- a windows build must run inside an activated VS dev shell" >&2; exit 1; }
+  TOOLCHAIN_ARGS=(-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl)
+fi
+
 echo "==> configuring"
 cmake -G Ninja -B "$BUILD_DIR" -S "$IREE_SRC" \
   "${FLAGS[@]}" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DCMAKE_INSTALL_LIBDIR=lib \
-  -DCMAKE_C_COMPILER=clang \
-  -DCMAKE_CXX_COMPILER=clang++ \
+  "${TOOLCHAIN_ARGS[@]}" \
   -DCMAKE_C_FLAGS="$COMPILER_FLAGS" \
   -DCMAKE_CXX_FLAGS="$COMPILER_FLAGS"
 

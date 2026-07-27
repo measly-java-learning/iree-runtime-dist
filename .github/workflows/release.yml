@@ -65,11 +65,19 @@ jobs:
               *) echo "error: no runner mapping for platform '$1'" >&2; return 2 ;;
             esac
           }
+          #
+          # Each pair also carries its `toolchain` -- naming.sh's
+          # platform_toolchain, the single source of truth for "does this
+          # platform build in a pinned Docker image or on a pinned runner
+          # image". The build job gates its Docker steps on it rather than
+          # matching on the platform string, so adding a platform never means
+          # editing a condition in YAML: the classifier already answers it.
           triples=""
           for p in $(known_platforms); do
             runner="$(runner_for "$p")"
+            toolchain="$(platform_toolchain "$p")"
             for v in $(known_variants "$p"); do
-              triples="${triples}${v} ${p} ${runner}"$'\n'
+              triples="${triples}${v} ${p} ${runner} ${toolchain}"$'\n'
             done
           done
           list="$(printf '%s' "$triples" | python3 -c '
@@ -79,8 +87,9 @@ jobs:
               line = line.strip()
               if not line:
                   continue
-              variant, platform, runner = line.split()
-              pairs.append({"variant": variant, "platform": platform, "runner": runner})
+              variant, platform, runner, toolchain = line.split()
+              pairs.append({"variant": variant, "platform": platform,
+                            "runner": runner, "toolchain": toolchain})
           print(json.dumps(pairs))
           ')"
           echo "list=$list" >> "$GITHUB_OUTPUT"
@@ -101,6 +110,17 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.setup.outputs.pairs) }}
     steps:
+      # Windows only, and necessarily BEFORE any checkout: IREE's source tree
+      # has paths long enough to exceed the legacy 260-character MAX_PATH, and
+      # several submodules contain symlinks. Without this, checkout fails
+      # partway through with an obscure "Filename too long".
+      - name: Allow long paths and symlinks in git
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --system core.longpaths true
+          git config --system core.symlinks true
+
       - uses: actions/checkout@v7
         with:
           path: dist
@@ -116,7 +136,11 @@ jobs:
           path: iree
           submodules: false
           fetch-depth: 1
+      # `shell: bash` explicitly: the default shell on a Windows runner is
+      # pwsh, where the unquoted space-separated submodule list would be
+      # passed as a single argument.
       - name: Init required submodules only
+        shell: bash
         working-directory: iree
         run: git submodule update --init --depth 1 ${{ needs.setup.outputs.submodules }}
 
@@ -127,7 +151,13 @@ jobs:
       # `path: dist` (to leave room for `iree/` alongside it). build-push-action
       # resolves `context`/`file` against the workspace root, and `uses:` steps
       # ignore `working-directory`, so a bare `docker` here is a nonexistent path.
+      # ---- container toolchain (Linux) ----------------------------------
+      # Gated on the toolchain CLASS from naming.sh's platform_toolchain, not
+      # on a platform string matched in YAML: a runner-toolchain platform has
+      # no Dockerfile at all, and build_image_tag/build_dockerfile fail loudly
+      # if asked for one.
       - name: Resolve build image identity
+        if: matrix.toolchain == 'container'
         env:
           PLATFORM: ${{ matrix.platform }}
         run: |
@@ -137,7 +167,9 @@ jobs:
             echo "BUILD_DOCKERFILE=dist/$(build_dockerfile "$PLATFORM")"
           } >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v4.2.0
+        if: matrix.toolchain == 'container'
       - name: Build the pinned toolchain image
+        if: matrix.toolchain == 'container'
         uses: docker/build-push-action@v7.3.0
         with:
           context: dist/docker
@@ -148,6 +180,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build in manylinux
+        if: matrix.toolchain == 'container'
         # UID/GID needs to be set here unlike w/ ExecuTorch dist because this runs
         # one step in a locally build container vs. the other which uses the widely available `manylinux`
         # container.
@@ -164,7 +197,69 @@ jobs:
                 --prefix /work/out --iree-src /iree
             '
 
+      # ---- runner toolchain (Windows) -----------------------------------
+      # No Dockerfile: the toolchain is the PINNED runner image (windows-2022)
+      # plus a VS dev-shell activation, which is why the runner label is the
+      # pin and msvc_toolset is attested from cl's own banner.
+      #
+      # test/build_smoke.sh reads the shipped COFF archives with llvm-nm, and
+      # skips its symbol assertions entirely when no nm resolves. VS ships
+      # llvm-nm but does not put it on PATH, so without this step the
+      # structural checks below would pass having verified nothing. Fail loudly
+      # if it is absent rather than let that happen.
+      - name: Put the VS-bundled LLVM tools on PATH
+        if: matrix.toolchain == 'runner'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found at $vswhere" }
+          $vsPath = & $vswhere -latest -products * -property installationPath
+          if (-not $vsPath) { throw "vswhere found no Visual Studio installation" }
+          $llvmBin = "$vsPath\VC\Tools\Llvm\x64\bin"
+          if (-not (Test-Path "$llvmBin\llvm-nm.exe")) {
+            throw "llvm-nm.exe not found under $llvmBin -- build_smoke.sh would silently skip its symbol checks"
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
+
+      - name: Build on the runner (VS dev shell)
+        if: matrix.toolchain == 'runner'
+        shell: pwsh
+        env:
+          COMPILER_VERSION: ${{ needs.setup.outputs.compiler_version }}
+          VARIANT: ${{ matrix.variant }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          # Discover the VS install edition-agnostically instead of hardcoding
+          # Enterprise, so a runner-image edition change cannot silently break this.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found at $vswhere" }
+          $vsPath = & $vswhere -latest -products * -property installationPath
+          if (-not $vsPath) { throw "vswhere found no Visual Studio installation" }
+          & "$vsPath\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -SkipAutomaticLocation
+
+          # Git-Bash by explicit path. C:\Windows\System32\bash.exe is WSL: it
+          # would run the recipe against Linux glibc with no MSVC in sight.
+          $bash = "${env:ProgramFiles}\Git\bin\bash.exe"
+          if (-not (Test-Path $bash)) { throw "Git-Bash not found at $bash" }
+
+          # Set-Location, not `cd` in cmd (which does not switch drives without
+          # /D -- runners are D:-rooted). bash inherits this directory and the
+          # dev shell's PATH/INCLUDE/LIB.
+          Set-Location "$env:GITHUB_WORKSPACE\dist"
+
+          # The bash program below deliberately contains NO double quotes: it is
+          # one pwsh single-quoted argument handed to a native .exe, and
+          # embedded quotes are re-quoted differently across pwsh native
+          # argument-passing modes. Nothing expanded here can contain a space
+          # (runner workspace paths and matrix tokens never do), and an
+          # unquoted expansion does not re-interpret the backslashes in
+          # $GITHUB_WORKSPACE. cygpath -u converts D:\a\... to /d/a/... so the
+          # recipe sees a POSIX source root, exactly as the 12b probe did.
+          & $bash -c 'set -euo pipefail; ws=$(cygpath -u $GITHUB_WORKSPACE); cd $ws/dist; ./build-runtime.sh --variant $VARIANT --platform $PLATFORM --prefix $ws/dist/out --iree-src $ws/iree'
+          if ($LASTEXITCODE -ne 0) { throw "windows build failed (exit $LASTEXITCODE)" }
+
       - name: Structural checks
+        shell: bash
         working-directory: dist
         run: |
           bash test/build_smoke.sh out
@@ -174,6 +269,7 @@ jobs:
           bash test/cmake_additions.test.sh out
 
       - name: Package
+        shell: bash
         working-directory: dist
         run: |
           bash scripts/package.sh out \
@@ -184,10 +280,14 @@ jobs:
         with:
           subject-path: dist/assets/*.tar.gz
 
+      # if-no-files-found: error, not the default `warn`. A build that produced
+      # no tarball must fail this job, not upload an empty artifact and let the
+      # job go green having shipped nothing.
       - uses: actions/upload-artifact@v7
         with:
           name: assets-${{ matrix.variant }}-${{ matrix.platform }}
           path: dist/assets/
+          if-no-files-found: error
 
   verify:
     # The acceptance gate. Runs in a container that has never seen the build tree

@@ -168,18 +168,49 @@ else
   assert_eq "$san" "" "default manifest omits sanitizer"
 fi
 
-# glibc_build must look like a real detected version (MAJOR.MINOR) or the
-# explicit "unknown" sentinel -- never a hard-coded/assumed value, and never
-# a silent empty string.
-gb="$(get "$m" "['glibc_build']")"
-if printf '%s' "$gb" | grep -qE '^[0-9]+\.[0-9]+$'; then
-  echo "ok: glibc_build looks like a version ($gb)"
-elif [ "$gb" = "unknown" ]; then
-  echo "ok: glibc_build is explicit 'unknown'"
-else
-  echo "FAIL: glibc_build '$gb' is neither a MAJOR.MINOR version nor 'unknown'" >&2
-  ASSERT_FAILS=$((ASSERT_FAILS+1))
-fi
+# Toolchain provenance is platform-conditional and MUTUALLY EXCLUSIVE: a
+# container-built Linux artifact records glibc_build and no MSVC fields; a
+# runner-built Windows artifact records msvc_toolset + crt and has no glibc at
+# all. Asserting both directions (present here, ABSENT there) is the point --
+# a manifest that carried glibc_build on Windows would be attesting to a libc
+# that never touched the build. Keyed off the prefix's own BUILDINFO platform
+# read above, never a hard-coded token.
+case "$platform" in
+  windows-*)
+    tk="$(getd "$m" msvc_toolset "")"
+    if printf '%s' "$tk" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+      echo "ok: msvc_toolset looks like a cl version ($tk)"
+    else
+      echo "FAIL: msvc_toolset '$tk' is not a cl.exe version" >&2
+      ASSERT_FAILS=$((ASSERT_FAILS+1))
+    fi
+    crt="$(getd "$m" crt "")"
+    if [ "$crt" = "MT" ] || [ "$crt" = "MD" ]; then echo "ok: crt recorded ($crt)"
+    else echo "FAIL: crt '$crt' is neither MT nor MD" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+    gb="$(getd "$m" glibc_build "<absent>")"
+    if [ "$gb" = "<absent>" ]; then echo "ok: no glibc_build on a windows artifact"
+    else echo "FAIL: windows manifest records glibc_build '$gb'" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+    ;;
+  *)
+    # glibc_build must look like a real detected version (MAJOR.MINOR) or the
+    # explicit "unknown" sentinel -- never a hard-coded/assumed value, and never
+    # a silent empty string.
+    gb="$(get "$m" "['glibc_build']")"
+    if printf '%s' "$gb" | grep -qE '^[0-9]+\.[0-9]+$'; then
+      echo "ok: glibc_build looks like a version ($gb)"
+    elif [ "$gb" = "unknown" ]; then
+      echo "ok: glibc_build is explicit 'unknown'"
+    else
+      echo "FAIL: glibc_build '$gb' is neither a MAJOR.MINOR version nor 'unknown'" >&2
+      ASSERT_FAILS=$((ASSERT_FAILS+1))
+    fi
+    for absent in msvc_toolset crt; do
+      v="$(getd "$m" "$absent" "<absent>")"
+      if [ "$v" = "<absent>" ]; then echo "ok: no $absent on a linux artifact"
+      else echo "FAIL: linux manifest records $absent '$v'" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+    done
+    ;;
+esac
 
 # The old glibc_floor field was misleading (implied a detected symbol-version
 # floor that static archives cannot actually provide -- see gen-manifest.sh).

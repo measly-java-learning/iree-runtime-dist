@@ -162,11 +162,11 @@ if not m:
 pairs = jsonlib.loads(m.group(1))
 
 expected = [
-    {"variant": "default", "platform": "linux-x86_64",   "runner": "ubuntu-latest"},
-    {"variant": "tsan",    "platform": "linux-x86_64",   "runner": "ubuntu-latest"},
-    {"variant": "default", "platform": "linux-aarch64",  "runner": "ubuntu-24.04-arm"},
-    {"variant": "tsan",    "platform": "linux-aarch64",  "runner": "ubuntu-24.04-arm"},
-    {"variant": "default", "platform": "windows-x86_64", "runner": "windows-2022"},
+    {"variant": "default", "platform": "linux-x86_64",   "runner": "ubuntu-latest",    "toolchain": "container"},
+    {"variant": "tsan",    "platform": "linux-x86_64",   "runner": "ubuntu-latest",    "toolchain": "container"},
+    {"variant": "default", "platform": "linux-aarch64",  "runner": "ubuntu-24.04-arm", "toolchain": "container"},
+    {"variant": "tsan",    "platform": "linux-aarch64",  "runner": "ubuntu-24.04-arm", "toolchain": "container"},
+    {"variant": "default", "platform": "windows-x86_64", "runner": "windows-2022",     "toolchain": "runner"},
 ]
 
 def key(p):
@@ -195,5 +195,51 @@ if got != exp:
     print(f"FAIL: full pair objects (incl. runner) differ from expected.\n  got: {pairs}\n  expected: {expected}")
     sys.exit(1)
 
-print(f"PASS: setup job emits exactly the {len(expected)} expected {{variant, platform, runner}} pairs")
+print(f"PASS: setup job emits exactly the {len(expected)} expected {{variant, platform, runner, toolchain}} pairs")
+
+# The build job now runs two different toolchains off one matrix. The failure
+# mode to guard against is not "Docker fails on Windows" (loud) but "the
+# Windows leg has nothing left to do and the job goes green having built
+# nothing" (silent). So assert BOTH directions:
+#   - every Docker-dependent step is gated to the container toolchain, and
+#   - the runner toolchain actually has a build step of its own.
+build_steps = wf["jobs"]["build"]["steps"]
+
+def gate(step):
+    return str(step.get("if", ""))
+
+docker_steps = [
+    s for s in build_steps
+    if "docker/" in s.get("uses", "") or "docker run" in s.get("run", "")
+    or "$(build_image_tag" in s.get("run", "")
+]
+if not docker_steps:
+    print("FAIL: no Docker-dependent steps found in the build job -- this check is inert")
+    sys.exit(1)
+ungated = [s.get("name") or s.get("uses") for s in docker_steps
+           if "matrix.toolchain == 'container'" not in gate(s)]
+if ungated:
+    print(f"FAIL: Docker-dependent build steps not gated on the container toolchain: {ungated}")
+    sys.exit(1)
+
+runner_steps = [s for s in build_steps if "matrix.toolchain == 'runner'" in gate(s)]
+if not any("build-runtime.sh" in s.get("run", "") for s in runner_steps):
+    print("FAIL: no runner-toolchain step invokes build-runtime.sh -- the Windows "
+          "leg would go green without building anything")
+    sys.exit(1)
+
+# Shared (ungated) steps run on every runner OS, where the default shell is
+# pwsh on Windows. Any shared step whose `run` calls bash tooling must say so.
+for s in build_steps:
+    run = s.get("run", "")
+    if gate(s) or not run:
+        continue
+    if run.lstrip().startswith("bash ") or "\nbash " in run:
+        if s.get("shell") != "bash":
+            print(f"FAIL: shared build step {s.get('name')!r} runs bash tooling "
+                  f"but does not set `shell: bash`; on Windows it would run under pwsh")
+            sys.exit(1)
+
+print(f"PASS: build job gates {len(docker_steps)} Docker steps on the container "
+      f"toolchain and has a real runner-toolchain build step")
 PY

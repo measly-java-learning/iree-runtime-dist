@@ -42,11 +42,39 @@ if [ -d "$prefix/THIRD-PARTY-NOTICES" ]; then echo "ok: THIRD-PARTY-NOTICES pres
 else echo "FAIL: THIRD-PARTY-NOTICES missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 
 # Determined empirically (Task 8): flatcc, printf, and libbacktrace are the
-# components with a real link-graph footprint reaching iree_runtime_unified.
-# See scripts/lib/linked-components.sh for the evidence trail.
-for linked in flatcc printf libbacktrace; do
+# components with a real link-graph footprint reaching iree_runtime_unified --
+# on LINUX. Windows links no libbacktrace at all (W4: no install rule, no
+# archive, zero backtrace_* symbols across the shipped archives), so the
+# expected set is per-platform. Read the platform from the prefix's own
+# BUILDINFO and ask linked-components.sh, rather than hard-coding a list that
+# is right for one platform and over-claims on the other. A missing/unreadable
+# platform is a hard failure: silently falling back to a default list is how a
+# notices test ends up asserting the wrong artifact's contents.
+platform="$(grep -oE '^platform=.*' "$prefix/BUILDINFO" 2>/dev/null | cut -d= -f2)"
+if [ -z "$platform" ]; then
+  echo "FAIL: no platform= line in $prefix/BUILDINFO -- cannot determine expected notices" >&2
+  exit $((ASSERT_FAILS+1))
+fi
+expected_linked="$(linked_components "$platform")" || {
+  echo "FAIL: linked_components rejected platform '$platform' from BUILDINFO" >&2
+  exit $((ASSERT_FAILS+1))
+}
+for linked in $expected_linked; do
   if [ -s "$prefix/THIRD-PARTY-NOTICES/$linked/LICENSE" ]; then echo "ok: $linked notice shipped"
   else echo "FAIL: $linked notice missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+done
+
+# The other direction: a component this platform does NOT link must not have a
+# notice shipped for it. Over-claiming a license is the same class of error as
+# claiming LLVM -- and on Windows libbacktrace is exactly that case.
+for maybe in flatcc printf libbacktrace; do
+  case " $expected_linked " in
+    *" $maybe "*) continue ;;
+  esac
+  if [ -e "$prefix/THIRD-PARTY-NOTICES/$maybe" ]; then
+    echo "FAIL: $maybe notice shipped but $maybe is not linked on $platform" >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+  else echo "ok: no $maybe notice on $platform (correctly not claimed)"; fi
 done
 
 # Nothing unlinked may be claimed. llvm-project is excluded by IREE_BUILD_COMPILER=OFF.
