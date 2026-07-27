@@ -17,7 +17,7 @@ assert_contains "$cf" "-DCMAKE_BUILD_TYPE=Release"       "release build"
 assert_contains "$cf" "-DCMAKE_POSITION_INDEPENDENT_CODE=ON" "PIC on"
 assert_contains "$cf" "-DIREE_ALLOCATOR_SYSTEM=libc"     "libc allocator"
 
-ef="$(effective_cmake_flags default)"
+ef="$(effective_cmake_flags default linux-x86_64)"
 assert_contains "$ef" "-DIREE_BUILD_COMPILER=OFF"        "effective includes common"
 assert_contains "$ef" "-DIREE_HAL_DRIVER_LOCAL_TASK=ON"  "effective includes variant"
 
@@ -42,7 +42,7 @@ else echo "ok: rejects unknown variant"; fi
   variant_flags() { printf '%s\n' '-DCOLLIDE=variant-value' '-DVARIANT_ONLY=ON'; }
   common_flags()  { printf '%s\n' '-DCOLLIDE=common-value' '-DCOMMON_ONLY=ON'; }
 
-  out="$(effective_cmake_flags default)"
+  out="$(effective_cmake_flags default linux-x86_64)"
 
   count="$(printf '%s\n' "$out" | grep -c '^-DCOLLIDE=' || true)"
   assert_eq "$count" "1" "colliding flag name appears exactly once"
@@ -75,7 +75,7 @@ ASSERT_FAILS=$((ASSERT_FAILS + collision_fails))
   variant_flags() { printf '%s\n' '-DIREE_BUILD_TESTS_EXTRA=ON'; }
   common_flags()  { printf '%s\n' '-DIREE_BUILD_TESTS=OFF'; }
 
-  out="$(effective_cmake_flags default)"
+  out="$(effective_cmake_flags default linux-x86_64)"
 
   assert_contains "$out" "-DIREE_BUILD_TESTS_EXTRA=ON" "prefix-only match does not suppress variant flag"
   assert_contains "$out" "-DIREE_BUILD_TESTS=OFF"       "unrelated common flag with shared prefix survives"
