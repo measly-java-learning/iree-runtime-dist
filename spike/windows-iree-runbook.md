@@ -644,3 +644,59 @@ already-installed skip branch — the one most exposed to Windows-specific path/
 directly exercised and is idempotent on this platform: re-running against an already-populated
 prefix neither re-copies nor drops anything. No Windows-specific repair is needed for Task 2;
 `scripts/install-headers.sh` is unchanged in this commit.
+
+## W8 — `/d1trimfile:` on the CI toolset (cl 19.44)
+
+The earlier W6 measurement of `/d1trimfile:` was taken on `winbox`'s cl **19.51** (VS 2026),
+which is not the toolset CI actually uses. `winbox` has no VS 2022 install alongside 2026
+(`vswhere -products *` on the host lists only `C:\Program Files\Microsoft Visual Studio\18\Community`,
+i.e. the "18"/2026 line), so this measurement was taken on a real `windows-2022` GitHub Actions
+runner via a throwaway `workflow_dispatch`/`push`-triggered workflow
+(`.github/workflows/probe-d1trimfile.yml`, pushed and removed in this same commit range — final
+green run: https://github.com/measly-java-learning/iree-runtime-dist/actions/runs/30227472685).
+
+**Toolset measured:** `Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35228 for x64` —
+matches the pinned CI toolset (cl 19.44.35228.0, VS 2022 Enterprise, toolset 14.44.35207) exactly.
+
+**Probe (`cmd` shell, no `MSYS_NO_PATHCONV` needed — this is a native `cmd` step, not Git-Bash, so
+there is no leading-`/` path conversion to guard against):**
+
+```
+mkdir C:\trimtest\sub
+cd /D C:\trimtest
+echo const char* f(void){ return __FILE__; } > sub\foo.c
+
+cl -nologo -c -Fo:base.obj C:\trimtest\sub\foo.c
+  BASE_EXIT=0
+  strings(base.obj) match: C:\trimtest\sub\foo.c
+
+cl -nologo -c -d1trimfile:C:\trimtest\ -Fo:trim.obj C:\trimtest\sub\foo.c
+  TRIM_EXIT=0
+  strings(trim.obj) match: sub\foo.c
+
+cl -nologo -c -d1trimfile:C:\trimtest\ -Fo:t2.obj C:\trimtest\sub\foo.c 2> diag.txt
+  DIAG_EXIT=0
+  diag.txt: empty (no warning/error/unrecognized text)
+```
+
+Two bugs surfaced and were fixed before this reading, both ordinary friction, not trip
+conditions: (1) plain `cd C:\trimtest` on a `D:`-rooted GH Windows runner updates only `C:`'s
+remembered directory without switching the active drive — needs `cd /D`; (2) a trailing backslash
+immediately before a closing double-quote (`"-d1trimfile:C:\trimtest\"`) is consumed by CRT argv
+parsing as an escaped quote, silently absorbing the rest of the command line into one argument
+(`D8003: missing source filename`) — since the flag has no embedded spaces, the fix is to drop
+the quoting entirely rather than escape it.
+
+**Before/after `__FILE__`:**
+
+| Build | `__FILE__` string embedded in the `.obj` |
+|---|---|
+| baseline (no flag) | `C:\trimtest\sub\foo.c` (absolute) |
+| `-d1trimfile:C:\trimtest\` | `sub\foo.c` (relative to the trim prefix) |
+
+**Verdict: parity holds.** Baseline is absolute, the trimmed build is relative, both compiles
+exit 0, and `diag.txt` carries no warning/error/unrecognized-flag text on cl 19.44.35228 — exactly
+the CI toolset. None of the fallback trip conditions in the design's "Fallback policy" section
+fire. Tasks 8–9 proceed on the Linux-parity path: the string-scan assertion plus `/d1trimfile:`
+as compile-time prevention, ported to `.lib`/`.obj` via `llvm-objcopy` for COFF, same as W6
+already scoped.

@@ -223,6 +223,14 @@ note that Windows then holds a weaker relocatability standard than Linux — vis
 deliberate, not silent. The `-natvis:` repair below is **not** part of the fallback: it is a
 text-file leak that reaches a consumer's link line, so it is required under either bar.
 
+**Decided (W8, spike/windows-iree-runbook.md): parity bar taken.** `/d1trimfile:` was measured
+directly on cl `19.44.35228` for x64 — the exact pinned CI toolset (VS 2022 Enterprise, toolset
+14.44.35207), via a throwaway `windows-2022` GitHub Actions run, not the earlier `winbox` cl 19.51
+(VS 2026) reading. Baseline `__FILE__` was absolute (`C:\trimtest\sub\foo.c`), the trimmed build
+was relative (`sub\foo.c`), both compiles exited 0, and no warning/error/unrecognized-flag
+diagnostics appeared. None of the trip conditions above fired. Tasks 8–9 implement Linux parity:
+the string-scan assertion plus `/d1trimfile:` as compile-time prevention.
+
 ### The `-natvis:` repair
 
 `iree_runtime_impl`'s `INTERFACE_LINK_LIBRARIES` carries
