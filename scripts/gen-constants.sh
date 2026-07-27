@@ -27,6 +27,14 @@ project(emit_constants C)
 find_package(IREERuntime REQUIRED)
 add_executable(emit_constants emit_constants.c)
 target_link_libraries(emit_constants PRIVATE iree_runtime_unified)
+if(MSVC)
+  # MSVC's default C mode predates C11 and rejects _Generic, which IREE's
+  # atomics headers use throughout -- the same issue test/consumer/CMakeLists.txt
+  # hit. /std:c17 is the whole delta -- do NOT switch LANGUAGE to CXX, which
+  # cascades into C7555/C4576/C7560 and would require this emitter to stop
+  # compiling as plain C, unlike Linux.
+  set_source_files_properties(emit_constants.c PROPERTIES COMPILE_FLAGS "/std:c17")
+endif()
 EOF
 cp "$HERE/../emit/emit_constants.c" "$work/"
 
@@ -35,7 +43,20 @@ cmake -G Ninja -B "$work/b" -S "$work" \
   -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build "$work/b" >/dev/null
 
-"$work/b/emit_constants" "$raw/element_types.json" "$raw/status_codes.json" "$raw/numerical_types.json"
+# MSVC/Ninja produces emit_constants.exe on Windows; other platforms produce
+# emit_constants with no suffix. Resolve whichever one the build actually
+# made instead of assuming a platform, and fail loudly if neither exists
+# rather than silently invoking a non-existent path.
+emitter="$work/b/emit_constants"
+if [ ! -x "$emitter" ] && [ -x "$emitter.exe" ]; then
+  emitter="$emitter.exe"
+fi
+if [ ! -x "$emitter" ]; then
+  echo "error: emit_constants binary not found at $work/b/emit_constants(.exe) after build" >&2
+  exit 1
+fi
+
+"$emitter" "$raw/element_types.json" "$raw/status_codes.json" "$raw/numerical_types.json"
 python3 "$HERE/enrich-constants.py" \
   "$raw/element_types.json" "$raw/status_codes.json" "$raw/numerical_types.json" "$OUT_DIR"
 echo "==> generated enriched element_types.json, status_codes.json + schemas"

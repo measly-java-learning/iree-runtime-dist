@@ -41,14 +41,23 @@ fi
 
 # MSVC toolset provenance, mirroring the glibc_build pattern above exactly:
 # detect from cl.exe's own version banner (cl prints "Microsoft (R) C/C++
-# Optimizing Compiler Version X.Y.Z.W ..." to stderr even with no args, and
+# Optimizing Compiler Version X.Y.Z ..." to stderr even with no args, and
 # exits non-zero) rather than trusting an assumed value. Every stage is
 # tolerant of failure (`|| true`) since a missing `cl` or an unexpected banner
 # format exiting non-zero under `set -euo pipefail` would otherwise abort the
 # whole script -- and an explicit "unknown" beats a silent empty string. On a
 # non-Windows host `cl` will not be on PATH at all, and "unknown" is the
 # correct recorded value in that case.
-MSVC_TOOLSET="$(cl 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+#
+# The banner's version is three dot-separated components on real cl.exe
+# (verified on a windows-2022 CI runner: "19.44.35228 for x64", and on VS2026:
+# "19.51.36248 for x64") -- NOT four. A four-component pattern matches nothing
+# against a real banner and silently falls back to "unknown" on every host,
+# including CI, making the manifest's own msvc_toolset provenance claim
+# vacuous. CMake's own compiler-identification strings do sometimes carry a
+# fourth (MSC_VER-style) component elsewhere, so accept an optional trailing
+# ".W" rather than assuming one fixed shape is the only one that can appear.
+MSVC_TOOLSET="$(cl 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
 [ -n "$MSVC_TOOLSET" ] || MSVC_TOOLSET="unknown"
 
 # crt is derived from the same effective_cmake_flags output that fed the

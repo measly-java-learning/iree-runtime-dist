@@ -43,11 +43,18 @@ done
 # Fake `cl` on PATH so the windows fixture exercises the real cl.exe-banner
 # detection path in gen-manifest.sh instead of falling back to "unknown" (this
 # host has no MSVC). The banner format matches a real cl.exe invocation with
-# no args: version printed to stderr, non-zero exit.
+# no args: version printed to stderr, non-zero exit. The version is THREE
+# dot-separated components on a real banner (verified against an actual
+# windows-2022 CI run and, separately, VS2026 on winbox: "19.44.35228 for
+# x64" / "19.51.36248 for x64") -- not four. An earlier four-component fixture
+# here matched no real banner and, combined with a four-component-only regex
+# in gen-manifest.sh, made msvc_toolset silently record "unknown" on every
+# real host including CI. Keep the fixture honest to what cl.exe actually
+# prints.
 mkdir -p "$fx/fakebin"
 cat > "$fx/fakebin/cl" <<'EOF'
 #!/bin/sh
-echo "Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35228.0 for x64" >&2
+echo "Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35228 for x64" >&2
 exit 2
 EOF
 chmod +x "$fx/fakebin/cl"
@@ -63,7 +70,7 @@ mw="$fx/windows-prefix/share/iree-runtime-dist/manifest.json"
 # Provenance keys are platform-conditional, following the existing conditional
 # `sanitizer` idiom. schema_version stays 2 -- the change is purely additive.
 assert_eq "$(get "$mw" "['schema_version']")" "2"             "windows manifest stays schema 2"
-assert_eq "$(get "$mw" "['msvc_toolset']")"   "19.44.35228.0" "windows records msvc_toolset"
+assert_eq "$(get "$mw" "['msvc_toolset']")"   "19.44.35228" "windows records msvc_toolset"
 assert_eq "$(get "$mw" "['crt']")"            "MT"            "windows records the static CRT"
 
 # Mutual absence is the assertion that stops the two provenance models silently
@@ -77,6 +84,29 @@ assert_eq "$(getd "$m"  "crt"          "ABSENT")" "ABSENT" "linux omits crt"
 # archives emit only /DEFAULTLIB:LIBCMT directives, so the CRT is resolved at the
 # consumer's final link. It is NOT a compatibility floor.
 assert_contains "$(get "$mw" "['notes']['crt']")" "final link" "crt note states where the CRT resolves"
+
+# The detection regex must also accept a four-component banner (some CMake
+# compiler-identification strings carry one) without regressing the
+# three-component real-world case above -- both shapes, not a swap of one
+# rigid assumption for another.
+fx4="$(mktemp -d)"
+trap 'rm -rf "$fx" "$fx4"' EXIT
+mkdir -p "$fx4/fakebin4"
+cat > "$fx4/fakebin4/cl" <<'EOF'
+#!/bin/sh
+echo "Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35228.1 for x64" >&2
+exit 2
+EOF
+chmod +x "$fx4/fakebin4/cl"
+mkdir -p "$fx4/windows-prefix4/include/iree/vm/bytecode/utils"
+cat > "$fx4/windows-prefix4/include/iree/vm/bytecode/utils/isa.h" <<'EOF'
+#define IREE_VM_BYTECODE_VERSION_MAJOR 17
+#define IREE_VM_BYTECODE_VERSION_MINOR 0
+EOF
+PATH="$fx4/fakebin4:$PATH" bash "$here/../scripts/gen-manifest.sh" "$fx4/windows-prefix4" default windows-x86_64 \
+  "$fx/iree-src" 3.11.0 3.11.0 >/dev/null
+mw4="$fx4/windows-prefix4/share/iree-runtime-dist/manifest.json"
+assert_eq "$(get "$mw4" "['msvc_toolset']")" "19.44.35228.1" "four-component banner also parses"
 
 # --- <prefix>-based structural checks (skip when no prefix given) ----------
 prefix="${1:-}"
