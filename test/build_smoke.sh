@@ -257,7 +257,19 @@ if [ -e "$targets_runtime" ]; then
       *'$<'*) continue ;;   # unresolved (possibly nested) generator-expression artifact
       *','*)  continue ;;   # $<TARGET_PROPERTY:tgt,PROP>-style artifact left after unwrap
                              # (a real target/library name never contains a comma)
-      -l*)    continue ;;   # already-normalized bare linker flag
+      -*)     continue ;;   # a raw linker flag, not a target reference.
+                             # Was `-l*` (GNU form, from relocatability
+                             # repair's absolute-system-path normalization);
+                             # MSVC puts its own flags in this list too --
+                             # observed: `-pdbpagesize:32768`, which shares the
+                             # property list with the -natvis: entries Task 9
+                             # repairs. Broadening to any leading dash is safe
+                             # for what this check is for: no CMake target and
+                             # no library name can begin with `-`, so a leading
+                             # dash unambiguously means "pass this through to
+                             # the linker", and the linker validates it. The
+                             # defect class here is a BARE NAME the linker will
+                             # try and fail to resolve as a library.
     esac
     if grep -qF "add_library($tok " "$targets_runtime"; then
       continue
@@ -270,7 +282,19 @@ if [ -e "$targets_runtime" ]; then
         fi
         ;;
       dl|rt|m|pthread)
-        continue
+        # POSIX system libraries: resolved by the linker's default search
+        # path, so a bare name is correct and needs no imported target.
+        if [ "$AR_EXT" = "a" ]; then continue; fi
+        ;;
+      shlwapi)
+        # The Windows SDK equivalent. IREE links shlwapi for its Win32 path
+        # helpers; MSVC resolves the bare name against the SDK's LIB paths, so
+        # like dl/rt/m/pthread it is correct as a bare name and needs no
+        # imported target. Gated on the COFF branch (and the POSIX names on
+        # the ELF branch) so neither platform's allowlist can silently excuse
+        # a dangling reference on the other, where that name resolves to
+        # nothing.
+        if [ "$AR_EXT" = "lib" ]; then continue; fi
         ;;
     esac
     dangling="$dangling $tok"
