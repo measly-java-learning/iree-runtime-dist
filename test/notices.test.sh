@@ -3,8 +3,37 @@
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/assert.sh"
+
+. "$here/../scripts/lib/linked-components.sh"
+
+# Derived per platform, never assumed. W4 confirmed libbacktrace is absent from
+# a Windows artifact four ways: no install rule, no archive in the prefix, zero
+# backtrace_* symbols across all 191 archives, and absent from iree_base_base's
+# INTERFACE_LINK_LIBRARIES where Linux carries it. Shipping the Linux list on a
+# Windows artifact would claim a license for code that is not there.
+assert_eq "$(linked_components linux-x86_64)"   "flatcc printf libbacktrace" "linux linked components"
+assert_eq "$(linked_components linux-aarch64)"  "flatcc printf libbacktrace" "linux-aarch64 linked components"
+assert_eq "$(linked_components windows-x86_64)" "flatcc printf"              "windows drops libbacktrace"
+
+linked_components bogus-platform >/dev/null 2>&1
+assert_eq "$?" "2" "linked_components rejects an unknown platform"
+
+# A caller that forgets the platform argument entirely must fail loudly, not
+# silently fall back to the Linux list or succeed with empty output -- either
+# would ship a notices set that doesn't match what the artifact contains.
+noarg_out="$(linked_components 2>/dev/null)"; noarg_status=$?
+assert_eq "$noarg_out" "" "linked_components with no argument produces no stdout"
+assert_eq "$noarg_status" "2" "linked_components with no argument returns non-zero"
+
+unknown_out="$(linked_components totally-unknown-platform 2>/dev/null)"; unknown_status=$?
+assert_eq "$unknown_out" "" "linked_components with unknown platform produces no stdout"
+assert_eq "$unknown_status" "2" "linked_components with unknown platform returns non-zero"
+
 prefix="${1:-}"
-if [ -z "$prefix" ]; then echo "skip: notices.test.sh needs a built prefix"; exit 0; fi
+if [ -z "$prefix" ]; then
+  echo "skip: prefix-dependent notices checks need a built prefix"
+  exit "$ASSERT_FAILS"
+fi
 
 if [ -s "$prefix/LICENSE" ]; then echo "ok: IREE LICENSE present and non-empty"
 else echo "FAIL: LICENSE missing or empty" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi

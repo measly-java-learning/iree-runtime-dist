@@ -434,7 +434,7 @@ bash "$HERE/scripts/gen-manifest.sh" "$PREFIX" "$VARIANT" "$PLATFORM" \
   "$IREE_SRC" "$IREE_VERSION" "$COMPILER_VERSION"
 
 echo "==> collecting license notices"
-bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC" "$BUILD_DIR"
+bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC" "$BUILD_DIR" "$PLATFORM"
 
 # Ship an in-artifact README documenting the share/ layout + JSON schema, so a
 # non-CMake consumer (Gradle/Python/Rust) has the path convention and file shapes

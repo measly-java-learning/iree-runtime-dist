@@ -69,6 +69,34 @@
 #
 # When the driver/loader set changes, re-run that inspection -- this list is not
 # derivable from the build flags alone.
-IREE_LINKED_COMPONENTS="flatcc printf libbacktrace"
+#
+#   WINDOWS (windows-x86_64) -- re-derived, not assumed. Same two-step method:
+#   transitive INTERFACE_LINK_LIBRARIES closure from iree_runtime_impl (72
+#   targets; iree_runtime_unified's own property is a genex delegating to it),
+#   then an nm cross-check with llvm-nm over all 191 installed .lib archives.
+#   flatcc      - ACCEPT. 10 flatcc_verify_* symbols defined in flatcc_parsing.lib
+#                 and referenced undefined from iree_vm_bytecode_module.lib and
+#                 iree_runtime_unified.lib. Same as Linux.
+#   printf      - ACCEPT. vfctprintf/vsnprintf_ referenced undefined from
+#                 iree_base_base.lib and iree_runtime_unified.lib. Same as Linux.
+#   libbacktrace - REJECTED on Windows, confirmed four ways: CMake emits no
+#                 install rule; no libbacktrace*.lib anywhere in the prefix; zero
+#                 backtrace_create_state/_full/_pcinfo/_simple/_syminfo symbols
+#                 across all 191 archives; and absent from iree_base_base's
+#                 INTERFACE_LINK_LIBRARIES, where the Linux build carries it.
+#                 It is NOT displaced by dbghelp -- that string appears zero times
+#                 in IREETargets-Runtime.cmake and iree_runtime_unified.lib
+#                 references no SymInitialize/SymFromAddr/StackWalk/
+#                 CaptureStackBackTrace symbol. The symbolization path is simply
+#                 not enabled in this configuration.
+#   See spike/windows-iree-runbook.md W4 for the full derivation.
+_IREE_LINKED_COMPONENTS_LINUX="flatcc printf libbacktrace"
+_IREE_LINKED_COMPONENTS_WINDOWS="flatcc printf"
 
-linked_components() { printf '%s' "$IREE_LINKED_COMPONENTS"; }
+linked_components() { # <platform>
+  case "${1:-}" in
+    linux-*)   printf '%s' "$_IREE_LINKED_COMPONENTS_LINUX" ;;
+    windows-*) printf '%s' "$_IREE_LINKED_COMPONENTS_WINDOWS" ;;
+    *) echo "error: unknown platform '${1:-}'" >&2; return 2 ;;
+  esac
+}
