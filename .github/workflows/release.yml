@@ -21,8 +21,7 @@ jobs:
       iree_tag: ${{ steps.derive.outputs.iree_tag }}
       compiler_version: ${{ steps.derive.outputs.compiler_version }}
       submodules: ${{ steps.submodules.outputs.list }}
-      platforms: ${{ steps.platforms.outputs.list }}
-      variants: ${{ steps.variants.outputs.list }}
+      pairs: ${{ steps.pairs.outputs.list }}
     steps:
       - uses: actions/checkout@v7
       - id: derive
@@ -35,31 +34,56 @@ jobs:
         run: |
           . scripts/lib/submodules.sh
           echo "list=$(required_submodules)" >> "$GITHUB_OUTPUT"
-      - id: platforms
-        # Single source of truth for the platform list (scripts/lib/naming.sh)
-        # threaded into the build/verify job matrices below via fromJson(),
-        # rather than a third and fourth hard-coded "linux-x86_64" here.
+      - id: pairs
+        # Replaces the old independent `platforms` and `variants` outputs.
+        # Those were cross-multiplied by the build/verify matrices below
+        # (variant x platform), which would generate a tsan/windows-x86_64
+        # job that cannot build -- TSan is clang-only, MSVC has no
+        # equivalent. Since known_variants/variants_json became
+        # platform-aware (windows is default-only), a bare
+        # `variants_json` (no platform) fails loudly by design rather than
+        # silently emitting `[]`.
+        #
+        # The fix is to never cross-multiply: emit the exact, already-valid
+        # {variant, platform} pairs by iterating known_platforms and calling
+        # known_variants "$p" per platform (never variants_json with no
+        # argument, and never a placeholder platform). The runner label is
+        # baked into each pair here too -- windows-2022 (never
+        # windows-latest, which would let msvc_toolset provenance drift
+        # silently) and the existing ubuntu labels for the two Linux
+        # platforms -- so the matrices below can use
+        # `strategy: matrix: include: fromJson(...)` with no separate
+        # cross-multiplying axis at all.
         run: |
           . scripts/lib/naming.sh
-          echo "list=$(platforms_json)" >> "$GITHUB_OUTPUT"
-      - id: variants
-        # KNOWN GAP, EXPECTED TO FAIL until the task that reshapes this
-        # matrix (Task 12) lands: known_variants/variants_json now take a
-        # <platform> argument (windows is default-only; tsan is clang-only),
-        # but this step still calls variants_json with none, and the
-        # build/verify matrices below still cross variant x platform
-        # independently -- fromJson(outputs.variants) x
-        # fromJson(outputs.platforms) -- so a platform-scoped variant list
-        # can't be threaded through without reshaping those matrices (e.g. to
-        # a single list of {variant, platform} pairs). variants_json now
-        # fails loudly (non-zero, no stdout) on a missing platform rather
-        # than silently emitting `[]`, so THIS STEP WILL FAIL the run until
-        # that reshaping happens -- a loud failure on a half-migrated branch
-        # is the correct state, not a bug to silence by passing a placeholder
-        # platform here.
-        run: |
           . scripts/lib/variants.sh
-          echo "list=$(variants_json)" >> "$GITHUB_OUTPUT"
+          runner_for() { # <platform>
+            case "$1" in
+              linux-x86_64)   printf 'ubuntu-latest' ;;
+              linux-aarch64)  printf 'ubuntu-24.04-arm' ;;
+              windows-x86_64) printf 'windows-2022' ;;
+              *) echo "error: no runner mapping for platform '$1'" >&2; return 2 ;;
+            esac
+          }
+          triples=""
+          for p in $(known_platforms); do
+            runner="$(runner_for "$p")"
+            for v in $(known_variants "$p"); do
+              triples="${triples}${v} ${p} ${runner}"$'\n'
+            done
+          done
+          list="$(printf '%s' "$triples" | python3 -c '
+          import json, sys
+          pairs = []
+          for line in sys.stdin:
+              line = line.strip()
+              if not line:
+                  continue
+              variant, platform, runner = line.split()
+              pairs.append({"variant": variant, "platform": platform, "runner": runner})
+          print(json.dumps(pairs))
+          ')"
+          echo "list=$list" >> "$GITHUB_OUTPUT"
       - run: bash test/run.sh
 
   build:
@@ -70,14 +94,12 @@ jobs:
       id-token: write
       attestations: write
     strategy:
+      # A single `include:`-only matrix, with no other axis to cross-multiply
+      # against: each entry from the setup job's `pairs` output already names
+      # its own variant, platform, and runner, so this can never produce a
+      # combination (e.g. tsan/windows-x86_64) that setup didn't emit.
       matrix:
-        variant: ${{ fromJson(needs.setup.outputs.variants) }}
-        platform: ${{ fromJson(needs.setup.outputs.platforms) }}
-        include:
-          - platform: linux-x86_64
-            runner: ubuntu-latest
-          - platform: linux-aarch64
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJson(needs.setup.outputs.pairs) }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -176,14 +198,9 @@ jobs:
     permissions:
       contents: read
     strategy:
+      # Same reshaped, non-cross-multiplying matrix as the build job above.
       matrix:
-        variant: ${{ fromJson(needs.setup.outputs.variants) }}
-        platform: ${{ fromJson(needs.setup.outputs.platforms) }}
-        include:
-          - platform: linux-x86_64
-            runner: ubuntu-latest
-          - platform: linux-aarch64
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJson(needs.setup.outputs.pairs) }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

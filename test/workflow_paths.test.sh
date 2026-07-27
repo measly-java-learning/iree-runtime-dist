@@ -117,4 +117,83 @@ for f in failures:
 if failures:
     sys.exit(1)
 print(f"PASS: workflow_paths ({checked} action path arguments resolve)")
+
+# The setup job's `pairs` step is the single source of the {variant, platform,
+# runner} list both the build and verify matrices fromJson() into via a bare
+# `include:` (no cross-multiplying axis). Execute that step's shell exactly as
+# CI would and assert the emitted list is exactly the five valid pairs -- not
+# merely non-empty, and not merely "excludes tsan/windows-x86_64": this repo
+# has shipped seven defects shaped like "a plausible-looking result instead of
+# failing or acting," and a short list here (e.g. only the Windows pair, from
+# a loop bug) is exactly that shape for a matrix.
+setup_steps = wf["jobs"]["setup"]["steps"]
+pairs_steps = [s for s in setup_steps if s.get("id") == "pairs"]
+if len(pairs_steps) != 1:
+    print(f"FAIL: expected exactly one setup step with id 'pairs', found {len(pairs_steps)}")
+    sys.exit(1)
+pairs_script = pairs_steps[0]["run"]
+
+import subprocess, tempfile, json as jsonlib
+
+with tempfile.NamedTemporaryFile(mode="w+", delete=False) as gh_out:
+    gh_out_path = gh_out.name
+try:
+    proc = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", pairs_script],
+        cwd=repo,
+        env={**os.environ, "GITHUB_OUTPUT": gh_out_path},
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        print("FAIL: the setup job's `pairs` step exited non-zero when executed directly")
+        print(proc.stdout)
+        print(proc.stderr)
+        sys.exit(1)
+    with open(gh_out_path) as f:
+        out = f.read()
+finally:
+    os.unlink(gh_out_path)
+
+m = re.search(r"^list=(.*)$", out, re.MULTILINE)
+if not m:
+    print(f"FAIL: the `pairs` step produced no 'list=' GITHUB_OUTPUT line; got: {out!r}")
+    sys.exit(1)
+pairs = jsonlib.loads(m.group(1))
+
+expected = [
+    {"variant": "default", "platform": "linux-x86_64",   "runner": "ubuntu-latest"},
+    {"variant": "tsan",    "platform": "linux-x86_64",   "runner": "ubuntu-latest"},
+    {"variant": "default", "platform": "linux-aarch64",  "runner": "ubuntu-24.04-arm"},
+    {"variant": "tsan",    "platform": "linux-aarch64",  "runner": "ubuntu-24.04-arm"},
+    {"variant": "default", "platform": "windows-x86_64", "runner": "windows-2022"},
+]
+
+def key(p):
+    return (p["variant"], p["platform"])
+
+got_set = {key(p) for p in pairs}
+expected_set = {key(p) for p in expected}
+
+if got_set != expected_set:
+    print(f"FAIL: emitted pairs {sorted(got_set)} != expected {sorted(expected_set)}")
+    sys.exit(1)
+if len(pairs) != len(expected):
+    print(f"FAIL: emitted {len(pairs)} pairs, expected exactly {len(expected)} (duplicates?): {pairs}")
+    sys.exit(1)
+if ("tsan", "windows-x86_64") in got_set:
+    print("FAIL: tsan/windows-x86_64 pair present -- TSan is clang-only, MSVC has no equivalent")
+    sys.exit(1)
+for p in pairs:
+    if p["platform"] == "windows-x86_64" and p["runner"] != "windows-2022":
+        print(f"FAIL: windows-x86_64 runner is {p['runner']!r}, must be pinned 'windows-2022' (never windows-latest)")
+        sys.exit(1)
+
+got = {tuple(sorted(x.items())) for x in pairs}
+exp = {tuple(sorted(x.items())) for x in expected}
+if got != exp:
+    print(f"FAIL: full pair objects (incl. runner) differ from expected.\n  got: {pairs}\n  expected: {expected}")
+    sys.exit(1)
+
+print(f"PASS: setup job emits exactly the {len(expected)} expected {{variant, platform, runner}} pairs")
 PY
