@@ -1018,63 +1018,111 @@ consumer would write."
 
 ### Task 12: Wire the Windows job into `release.yml`
 
-**Files:**
-- Modify: `.github/workflows/release.yml:55-160` (build job), `:160-260` (verify job), `:340-365` (upload)
-- Test: `test/workflow_paths.test.sh`
+**Split into 12a-12d during execution.** Task 3 (the only prior CI-touching task) cost 57
+minutes, six commits and three failed runs on a three-command probe -- not because it was hard,
+but because four independent bugs (YAML parse, drive-switching, argv quoting, workflow
+registration) were discovered *serially*, each costing a full CI round trip. The split shortens
+the feedback loop at every step and moves everything that can be checked locally off CI.
 
-**Interfaces:**
-- Consumes: every preceding task.
-- Produces: a release run that publishes `iree-runtime-3.11.0-default-windows-x86_64.tar.gz` and its `.sha256`.
+`actionlint` is available locally and catches the YAML/expression class before any push. Use it
+in every sub-task.
 
-- [ ] **Step 1: Make the matrix platform-aware**
+---
 
-The setup job currently emits one `variants` list. Emit a per-platform mapping instead, or fan out `include:` entries computed from `known_variants <platform>` so no `tsan`/`windows-x86_64` combination is ever generated. Add `- platform: windows-x86_64` / `runner: windows-2022` to the `include:` block that assigns runners.
+#### Task 12a: Reshape the matrix into {variant, platform} pairs -- NO CI
 
-- [ ] **Step 2: Branch the build step on toolchain**
+**Files:** Modify `.github/workflows/release.yml` (setup job outputs, build/verify matrices,
+`include:` runner mapping); Test: `test/workflow_paths.test.sh`
 
-Guard the existing Docker steps with `if: matrix.toolchain == 'container'` (computed from `platform_toolchain` in the setup job) and add a runner-native path for Windows:
+**Interfaces:** Consumes `known_variants <platform>` / `variants_json <platform>` (Task 4) and
+`platforms_json` (Task 1). Produces a setup-job output that is a single JSON array of
+`{variant, platform}` objects, consumed by `fromJson()` in both matrices.
 
-```yaml
-      - name: Build (runner-native, Windows)
-        if: matrix.toolchain == 'runner'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vswhere -latest -products * -property installationPath
-          if (-not $vsPath) { throw "vswhere found no Visual Studio installation" }
-          & "$vsPath\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -SkipAutomaticLocation
-          $bash = "${env:ProgramFiles}\Git\bin\bash.exe"
-          & $bash -c 'set -euo pipefail; ./dist/build-runtime.sh --variant default --platform windows-x86_64'
-          if ($LASTEXITCODE -ne 0) { throw "windows build failed (exit $LASTEXITCODE)" }
-```
+The setup job currently emits two independent lists which the matrices cross-multiply, so a
+`tsan`/`windows-x86_64` job would be generated. Since Task 4, `variants_json` requires a
+platform and this step **fails loudly by design** -- 12a is what un-breaks it. Do not silence it
+with a placeholder platform.
 
-Never invoke `C:\Windows\System32\bash.exe` — that is WSL and would build Linux ELF/glibc, giving a false green.
+- [ ] **Step 1: Write the failing test.** Extend `test/workflow_paths.test.sh` to parse
+  `release.yml`, execute the setup job's pair-building shell, and assert the result contains
+  exactly the five valid pairs (`default`/`tsan` x both Linux platforms, plus
+  `default`/`windows-x86_64`) and **no** `tsan`/`windows-x86_64` pair.
+- [ ] **Step 2: Run it and watch it fail.**
+- [ ] **Step 3: Implement.** Build the pair list in the setup job by iterating
+  `known_platforms` and calling `known_variants "$p"` per platform. Add
+  `- platform: windows-x86_64` / `runner: windows-2022` to the `include:` block. Never
+  `windows-latest`.
+- [ ] **Step 4: Verify locally, three ways.** `actionlint .github/workflows/release.yml`;
+  run the setup job's shell directly and eyeball the emitted JSON; `bash test/run.sh`.
+- [ ] **Step 5: Commit.**
 
-- [ ] **Step 3: Branch the verify job the same way**
+---
 
-The Linux verify job runs in a container. The Windows one runs directly on the fresh runner, downloads only the release asset, and must **not** check out `iree-org/iree`. Extract with `tar -xzf` via Git-Bash — packaging is `.tar.gz` on every platform.
+#### Task 12b: Prove the Windows harness in a throwaway smoke workflow -- CHEAP CI
 
-- [ ] **Step 4: Run the workflow-path test**
+**Files:** Create `.github/workflows/windows-smoke.yml` (temporary, removed in 12c)
 
-Run: `bash test/workflow_paths.test.sh && bash test/run.sh`
-Expected: PASS, then `ALL UNIT TESTS PASS`.
+Iterate the Windows plumbing somewhere a failed run costs ~2 minutes instead of ~40. Do NOT
+touch `release.yml` in this sub-task.
 
-- [ ] **Step 5: Dry-run the workflow**
+Trigger on `push` -- Task 3 established `workflow_dispatch` only registers from the default
+branch, so it cannot be used from a feature branch.
 
-Trigger a `workflow_dispatch` run on the branch. Confirm: no `tsan`/`windows-x86_64` job is scheduled; the Windows job reports `windows-2022`; the built manifest carries `msvc_toolset`/`crt` and no `glibc_build`; the notices tree contains no libbacktrace entry.
+The job must: check out this repo and IREE (required submodules only, never `recursive`),
+activate MSVC via `vswhere` -> `Launch-VsDevShell.ps1 -Arch amd64 -SkipAutomaticLocation`, hand
+off to `"${env:ProgramFiles}\Git\bin\bash.exe"`, and run
+`./build-runtime.sh --print-flags --variant default --platform windows-x86_64 --iree-src <checkout>`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 1:** Write the workflow. `actionlint` it BEFORE pushing.
+- [ ] **Step 2:** Push and read the run.
+- [ ] **Step 3:** Assert from the log: `cl` banner shows 19.44.x; the emitted flags contain
+  `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`; and `/d1trimfile:` carries a **Windows-form,
+  non-empty** prefix ending in a single backslash (`C:\...\iree\`), proving `cygpath -w`
+  resolved on the runner. An empty or POSIX-form prefix means the trim silently matches nothing.
+- [ ] **Step 4:** Iterate here until green. Known traps: `cd` needs `/D` to switch drives
+  (runners are D:-rooted); a step `name:` containing a colon must be quoted; a trailing
+  backslash before a closing quote mangles CRT argv; never `C:\Windows\System32\bash.exe`
+  (that is WSL and builds Linux).
+- [ ] **Step 5:** Commit the proven workflow.
 
-```bash
-git add .github/workflows/release.yml
-git commit -m "ci: build and verify windows-x86_64 on a pinned windows-2022 runner
+---
 
-Container steps are gated on the toolchain classifier; Windows takes a
-runner-native path via vswhere -> VS dev shell -> Git-Bash. The verify job
-takes its no-build-tree isolation from the job boundary and never checks
-out IREE. Packaging stays .tar.gz."
-```
+#### Task 12c: Port the proven steps into release.yml; full build, artifact only -- ONE LONG RUN
+
+**Files:** Modify `.github/workflows/release.yml`; delete `.github/workflows/windows-smoke.yml`
+
+Copy the *proven* activation and build steps from 12b into `release.yml`'s build job, gated on
+the toolchain classifier (`if: matrix.toolchain == 'container'` for the existing Docker steps, a
+runner-native path otherwise). Run a real Windows build and upload the tarball with
+`actions/upload-artifact` -- do NOT publish a release. Because 12b settled the harness, any
+failure here is a genuine build failure.
+
+- [ ] **Step 1:** Port steps; `actionlint`; `bash test/run.sh`.
+- [ ] **Step 2:** Push, run, read.
+- [ ] **Step 3:** Download the artifact and verify: `bash test/build_smoke.sh <extracted>`
+  passes; `manifest.json` carries `msvc_toolset` and `crt` and **no** `glibc_build`;
+  `THIRD-PARTY-NOTICES/` contains flatcc and printf and **no** libbacktrace.
+- [ ] **Step 4:** Delete `windows-smoke.yml`. Commit.
+
+---
+
+#### Task 12d: Verify job + real tagged release
+
+**Files:** Modify `.github/workflows/release.yml` (verify job)
+
+The Linux verify job runs in a container that never saw the build tree. Windows takes the same
+guarantee from the job boundary: a fresh runner that downloads only the release asset and
+**never checks out `iree-org/iree`**.
+
+- [ ] **Step 1:** Add the Windows verify path; `actionlint`; `bash test/run.sh`.
+- [ ] **Step 2:** Cut a real tagged release. Burning a few tags is acceptable
+  (`linux-aarch64` took five).
+- [ ] **Step 3:** Assert the published assets: both Linux platforms x both variants, plus
+  `windows-x86_64`/`default`, each with its `.sha256`, all `.tar.gz`.
+- [ ] **Step 4:** Confirm the Task 6 obligation is satisfied -- `notes.msvc_toolset` claims the
+  archives were built on a **pinned** `windows-2022` image. If the workflow does not pin it,
+  that note is a false provenance claim and must be reworded.
+- [ ] **Step 5:** Commit.
 
 ---
 
