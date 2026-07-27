@@ -28,7 +28,7 @@ banner="$(cl 2>&1 | tr -d '\r' | head -n 2 || true)"
 echo "--- cl banner ---"
 printf '%s\n' "$banner"
 echo "MEASURED cl_banner: $(printf '%s\n' "$banner" | head -n 1)"
-printf '%s\n' "$banner" | grep -Eq 'Version 19\.99\.[0-9]+' \
+printf '%s\n' "$banner" | grep -Eq 'Version 19\.44\.[0-9]+' \
   || fail "cl banner is not 19.44.x -- toolset is not the pinned windows-2022 one"
 echo "OK assertion 1: cl is 19.44.x"
 
