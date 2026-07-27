@@ -440,7 +440,12 @@ code that is not present in any form.
 
 > **New relocatability finding (Windows).** The installed export set contains an absolute
 > path into the *source* tree: `-natvis:C:/Users/cored/workspace/iree/runtime/iree.natvis`, in
-> `iree_runtime_impl`'s `INTERFACE_LINK_LIBRARIES`. A consumer on any other machine gets a
+> **`INTERFACE_LINK_OPTIONS`** — three occurrences in `IREETargets-Runtime.cmake` (lines 132,
+> 196, 233 of the measured file), each sharing the list with `-pdbpagesize:32768`. (An earlier
+> draft of this note said `iree_runtime_impl`'s `INTERFACE_LINK_LIBRARIES`; that was wrong.
+> `iree_runtime_impl`'s link-libraries list contains only real targets plus `Threads::Threads`.
+> The distinction matters to the repair: it must strip one entry from a `LINK_OPTIONS` list
+> without disturbing `-pdbpagesize:32768`.) A consumer on any other machine gets a
 > dangling `-natvis:` flag on their link line. This is exactly the class of leak
 > `scripts/relocatability.sh` asserts against on Linux, and it means the deferred "port
 > relocatability to Windows" item is **not** merely lighter than Linux as previously assumed —

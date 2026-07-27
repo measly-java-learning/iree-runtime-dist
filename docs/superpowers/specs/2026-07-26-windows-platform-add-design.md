@@ -233,9 +233,12 @@ the string-scan assertion plus `/d1trimfile:` as compile-time prevention.
 
 ### The `-natvis:` repair
 
-`iree_runtime_impl`'s `INTERFACE_LINK_LIBRARIES` carries
+`IREETargets-Runtime.cmake`'s **`INTERFACE_LINK_OPTIONS`** carries
 `-natvis:C:/…/iree/runtime/iree.natvis`, an absolute source path that would reach a consumer's
-link line. This is a text-file repair in `IREETargets-Runtime.cmake` and falls **inside** the
+link line — three occurrences, each sharing the option list with `-pdbpagesize:32768`, which
+must survive the repair untouched. (An earlier draft placed this in `iree_runtime_impl`'s
+`INTERFACE_LINK_LIBRARIES`; that was wrong, and the correction matters because the repair has
+to be surgical within a shared list rather than dropping a whole property.) This is a text-file repair in `IREETargets-Runtime.cmake` and falls **inside** the
 existing `relocatability_repair` sanctioned exception — it does not create a third exception to
 CLAUDE.md's "upstream CMake files ship unmodified" rule. Text files are never exempt from the
 assertion, so the DWARF relaxation never applied to it.
