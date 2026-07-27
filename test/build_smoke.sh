@@ -130,16 +130,29 @@ fi
 # they say nothing about whether .text is position-independent. The sanitizer
 # variant builds with -g, so a naive scan of all relocations false-positives on
 # its debug info; only relocations in non-.debug sections indicate non-PIC code.
-bad=0
-for a in "$prefix"/lib/*."$AR_EXT"; do
-  if readelf -r "$a" 2>/dev/null | awk '
-      /^Relocation section/ { indbg = ($0 ~ /\.debug/) }
-      !indbg && /R_X86_64_(32|32S)[[:space:]]/ { found=1 }
-      END { exit(found ? 0 : 1) }'; then
-    echo "FAIL: non-PIC relocations in code section of $(basename "$a")" >&2; bad=1
-  fi
-done
-if [ "$bad" -eq 0 ]; then echo "ok: archives are PIC (code sections; DWARF debug relocs ignored)"; else ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+#
+# ELF-only: readelf cannot parse COFF (.lib) archives at all, and PIC/PIE is
+# not a meaningful concept for MSVC-produced code in the first place (CLAUDE.md
+# records that -DCMAKE_POSITION_INDEPENDENT_CODE=ON is a harmless no-op on
+# MSVC) -- so on the COFF path there is genuinely nothing to check, not merely
+# something unverifiable. Gate the whole block on AR_EXT and skip explicitly
+# rather than either faking a pass (readelf silently no-op'ing on every
+# archive, "bad" staying 0, printing a false "ok:") or failing a check that
+# doesn't apply to the platform.
+if [ "$AR_EXT" = "a" ]; then
+  bad=0
+  for a in "$prefix"/lib/*."$AR_EXT"; do
+    if readelf -r "$a" 2>/dev/null | awk '
+        /^Relocation section/ { indbg = ($0 ~ /\.debug/) }
+        !indbg && /R_X86_64_(32|32S)[[:space:]]/ { found=1 }
+        END { exit(found ? 0 : 1) }'; then
+      echo "FAIL: non-PIC relocations in code section of $(basename "$a")" >&2; bad=1
+    fi
+  done
+  if [ "$bad" -eq 0 ]; then echo "ok: archives are PIC (code sections; DWARF debug relocs ignored)"; else ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+else
+  echo "skip: PIC check is ELF-only; PIC/PIE has no meaning for COFF archives (MSVC)"
+fi
 
 # Header closure: every header #include "iree/..."-ed directly by the three public
 # entry points a consumer #includes must actually exist under include/. This is the
