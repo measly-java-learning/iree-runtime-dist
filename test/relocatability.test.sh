@@ -193,4 +193,48 @@ else
 fi
 rm -rf "$dbg_tmp" "$clean_tmp"
 
+# --- COFF (.lib/.obj) awareness ---------------------------------------------
+# A leaked path in a Windows .lib must be caught. The existing case pattern is
+# *.a|*.o|*.so|*.so.*, so a .lib falls through to the "always real" branch --
+# correct by accident today, asserted deliberately here.
+win_tmp="$(mktemp -d)"; mkdir -p "$win_tmp/lib"
+printf 'C:\\Users\\builder\\workspace\\iree-build\\junk\n' > "$win_tmp/lib/leaky.lib"
+if relocatability_assert "$win_tmp" 'C:\Users\builder\workspace\iree-build' 'C:\Users\builder\workspace\iree' >/dev/null 2>&1; then
+  echo "FAIL: a leaked build path in a .lib was not caught" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+else
+  echo "ok: leaked build path in a .lib is caught"
+fi
+rm -rf "$win_tmp"
+
+# The debug-path exemption must NOT rescue a .lib, even when enabled: the paths
+# it would need to exempt are __FILE__ string constants, not debug sections.
+win2="$(mktemp -d)"; mkdir -p "$win2/lib"
+printf 'C:\\Users\\builder\\workspace\\iree\\runtime\\src\\iree\\base\\allocator.c\n' > "$win2/lib/file.lib"
+if RELOC_ALLOW_DEBUG_PATHS=1 relocatability_assert "$win2" 'C:\Users\builder\workspace\iree-build' 'C:\Users\builder\workspace\iree' >/dev/null 2>&1; then
+  echo "FAIL: RELOC_ALLOW_DEBUG_PATHS wrongly exempted a __FILE__ leak in a .lib" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+else
+  echo "ok: exemption does not rescue a __FILE__ leak in a .lib"
+fi
+rm -rf "$win2"
+
+# A missing/failing strip tool must NOT cause an exemption. This host has no
+# llvm-objcopy (verified separately), so the .lib branch's `llvm-objcopy ...
+# && ! grep ...` should short-circuit on the failed command and treat the hit
+# as real -- never fail open. This is the direct regression test for that
+# failure mode: if a future refactor drops the `&&` short-circuit (e.g.
+# ignoring the strip tool's exit code), this is what would start silently
+# exempting real leaks.
+missing_tool_tmp="$(mktemp -d)"; mkdir -p "$missing_tool_tmp/lib"
+printf 'C:\\Users\\builder\\workspace\\iree-build\\junk\n' > "$missing_tool_tmp/lib/leaky.obj"
+if command -v llvm-objcopy >/dev/null 2>&1; then
+  echo "SKIP: llvm-objcopy is present on this host; missing-tool fail-open regression not exercised" >&2
+else
+  if RELOC_ALLOW_DEBUG_PATHS=1 relocatability_assert "$missing_tool_tmp" 'C:\Users\builder\workspace\iree-build' 'C:\Users\builder\workspace\iree' >/dev/null 2>&1; then
+    echo "FAIL: a missing llvm-objcopy caused the leak to be silently exempted" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+  else
+    echo "ok: missing llvm-objcopy does not fail open -- leak still caught"
+  fi
+fi
+rm -rf "$missing_tool_tmp"
+
 exit "$ASSERT_FAILS"

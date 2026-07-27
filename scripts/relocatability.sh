@@ -114,6 +114,21 @@ relocatability_assert() { # <prefix> <build_path> <src_path> [extra_needle...]
             fi
             rm -f "$tmp"
             ;;
+          *.lib|*.obj)
+            # COFF. objcopy cannot read these; llvm-objcopy can. Note this
+            # branch is currently unreachable in practice --
+            # RELOC_ALLOW_DEBUG_PATHS is gated to sanitizer variants and
+            # Windows is default-only -- but the tool must be correct if a
+            # future sanitizer variant ever lands there.
+            tmp="$(mktemp)"
+            if llvm-objcopy --strip-debug "$f" "$tmp" 2>/dev/null \
+                 && ! grep -qE -- "$pattern" "$tmp"; then
+              : # path was debug-only -> exempt
+            else
+              surviving="$surviving $f"   # survives strip (or strip failed) -> real
+            fi
+            rm -f "$tmp"
+            ;;
           *) surviving="$surviving $f" ;;  # non-object -> always real
         esac
       done
