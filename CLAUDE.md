@@ -139,13 +139,29 @@ consumer's own build must use clang to match the toolchain this variant was comp
 
 ## manifest.json
 
-`schema_version: 2`. `glibc_build` records the glibc of the container the archives were
-*compiled against* (2.28) — it is not a compatibility floor and must never be described as one.
-Static archives carry unversioned undefined libc symbols; glibc symbol-version resolution happens
-at the *consumer's* final link, not in the archive, so scanning `.a` files for `GLIBC_x.y`
-strings is structurally incapable of producing a floor. `gen-manifest.sh` documents this in the
-manifest's own `notes.glibc_build` field — keep that note in sync with any future change to how
-this value is computed.
+`schema_version: 2`. Provenance keys are platform-conditional, following the same conditional
+idiom as `sanitizer`: `glibc_build` appears only on `linux-*` manifests, and `msvc_toolset` +
+`crt` appear only on `windows-*` manifests — each absent (not `null`, not `"n/a"`) on the other
+platform, so the two provenance models can never silently merge. `schema_version` stays `2` for
+both; this is purely additive and breaks no existing consumer.
+
+`glibc_build` records the glibc of the container the archives were *compiled against* (2.28) —
+it is not a compatibility floor and must never be described as one. Static archives carry
+unversioned undefined libc symbols; glibc symbol-version resolution happens at the *consumer's*
+final link, not in the archive, so scanning `.a` files for `GLIBC_x.y` strings is structurally
+incapable of producing a floor. `gen-manifest.sh` documents this in the manifest's own
+`notes.glibc_build` field — keep that note in sync with any future change to how this value is
+computed.
+
+`msvc_toolset` records the `cl.exe` version the Windows archives were compiled with (detected
+from `cl`'s own version banner, `"unknown"` when `cl` isn't on `PATH`) — provenance, not a
+compatibility claim. `crt` records the C runtime model (`MT` = static `/MT`, `MD` = dynamic
+`/MD`), derived from `effective_cmake_flags`' `CMAKE_MSVC_RUNTIME_LIBRARY` cache value rather
+than hardcoded, so the manifest cannot claim a CRT the build didn't actually use. Same honesty
+standard as `glibc_build`: the archives carry only `/DEFAULTLIB:LIBCMT` directives, and the CRT
+itself is resolved at the *consumer's* final link, not embedded in the archive — `crt` is the
+CRT a consumer must match to avoid a mixed-CRT link, not a compatibility floor. `gen-manifest.sh`
+documents this in `notes.crt`, kept in sync the same way.
 
 ## Testing
 
