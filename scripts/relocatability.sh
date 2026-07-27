@@ -67,6 +67,29 @@ relocatability_assert() { # <prefix> <build_path> <src_path> [extra_needle...]
   shift 3
   local rc=0 hits needle escaped
 
+  # Resolve a COFF-capable objcopy once, up front. Debian/Ubuntu (and most
+  # distro packaging of LLVM) ship it under a versioned name -- llvm-objcopy
+  # bare is frequently absent even when LLVM is installed -- so a fixed
+  # `llvm-objcopy` call silently never resolves on those hosts and the
+  # *.lib|*.obj branch below would never actually strip anything. Honour an
+  # explicit override first, then fall back through plausible versioned
+  # names. If nothing resolves, coff_strip_tool stays empty; the *.lib|*.obj
+  # branch below then requires `-n "$coff_strip_tool"` before ever invoking
+  # it, so an unresolved tool fails closed (the file is treated as a real
+  # leak, never exempted) rather than silently doing nothing.
+  local coff_strip_tool=""
+  if [ -n "${LLVM_OBJCOPY:-}" ] && command -v "${LLVM_OBJCOPY}" >/dev/null 2>&1; then
+    coff_strip_tool="${LLVM_OBJCOPY}"
+  else
+    local _coff_cand
+    for _coff_cand in llvm-objcopy llvm-objcopy-18 llvm-objcopy-17; do
+      if command -v "$_coff_cand" >/dev/null 2>&1; then
+        coff_strip_tool="$_coff_cand"
+        break
+      fi
+    done
+  fi
+
   for needle in "$build" "$src" "$@"; do
     # Match the needle only at a genuine path boundary (not preceded by an
     # identifier/path character), OR immediately after a compiler flag
@@ -115,17 +138,22 @@ relocatability_assert() { # <prefix> <build_path> <src_path> [extra_needle...]
             rm -f "$tmp"
             ;;
           *.lib|*.obj)
-            # COFF. objcopy cannot read these; llvm-objcopy can. Note this
+            # COFF. objcopy cannot read these; llvm-objcopy (resolved above,
+            # honouring versioned names like llvm-objcopy-18) can. Note this
             # branch is currently unreachable in practice --
             # RELOC_ALLOW_DEBUG_PATHS is gated to sanitizer variants and
             # Windows is default-only -- but the tool must be correct if a
-            # future sanitizer variant ever lands there.
+            # future sanitizer variant ever lands there. If no COFF strip
+            # tool resolved, coff_strip_tool is empty, the `-n` check below
+            # fails, and the file is treated as a real leak -- fail closed,
+            # never exempted.
             tmp="$(mktemp)"
-            if llvm-objcopy --strip-debug "$f" "$tmp" 2>/dev/null \
+            if [ -n "$coff_strip_tool" ] \
+                 && "$coff_strip_tool" --strip-debug "$f" "$tmp" 2>/dev/null \
                  && ! grep -qE -- "$pattern" "$tmp"; then
               : # path was debug-only -> exempt
             else
-              surviving="$surviving $f"   # survives strip (or strip failed) -> real
+              surviving="$surviving $f"   # survives strip (or strip failed, or no tool) -> real
             fi
             rm -f "$tmp"
             ;;

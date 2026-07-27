@@ -217,24 +217,56 @@ else
 fi
 rm -rf "$win2"
 
-# A missing/failing strip tool must NOT cause an exemption. This host has no
-# llvm-objcopy (verified separately), so the .lib branch's `llvm-objcopy ...
-# && ! grep ...` should short-circuit on the failed command and treat the hit
-# as real -- never fail open. This is the direct regression test for that
-# failure mode: if a future refactor drops the `&&` short-circuit (e.g.
-# ignoring the strip tool's exit code), this is what would start silently
-# exempting real leaks.
+# A missing/failing strip tool must NOT cause an exemption -- and this must
+# be proven deterministically, not merely observed on whatever the current
+# host happens to have installed. A host WITH llvm-objcopy present is
+# exactly the environment where the fail-open risk is live, so relying on
+# "this host happens to lack it" would silently skip the regression on the
+# hosts that matter most. Force both scenarios with a PATH shim containing
+# only the external commands relocatability_assert's exemption path needs
+# (sed, grep, mktemp, rm) -- llvm-objcopy is deliberately absent from it,
+# or present-but-failing, regardless of what the real host provides.
+shim_dir="$(mktemp -d)"
+for _tool in sed grep mktemp rm; do
+  ln -s "$(command -v "$_tool")" "$shim_dir/$_tool"
+done
+old_path="$PATH"
+
+# Case A: no llvm-objcopy resolves at all (not on PATH under any name).
+# The `&&` short-circuit on the failed `command -v`/exec inside
+# relocatability_assert's coff_strip_tool resolution should leave
+# coff_strip_tool empty, and the .lib branch should treat the hit as real --
+# never fail open. This is the direct regression test for that failure mode:
+# if a future refactor drops the `-n "$coff_strip_tool"` guard or the `&&`
+# short-circuit, this is what would start silently exempting real leaks.
 missing_tool_tmp="$(mktemp -d)"; mkdir -p "$missing_tool_tmp/lib"
 printf 'C:\\Users\\builder\\workspace\\iree-build\\junk\n' > "$missing_tool_tmp/lib/leaky.obj"
-if command -v llvm-objcopy >/dev/null 2>&1; then
-  echo "SKIP: llvm-objcopy is present on this host; missing-tool fail-open regression not exercised" >&2
+PATH="$shim_dir"
+if RELOC_ALLOW_DEBUG_PATHS=1 relocatability_assert "$missing_tool_tmp" 'C:\Users\builder\workspace\iree-build' 'C:\Users\builder\workspace\iree' >/dev/null 2>&1; then
+  echo "FAIL: no COFF strip tool on PATH caused the leak to be silently exempted" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
 else
-  if RELOC_ALLOW_DEBUG_PATHS=1 relocatability_assert "$missing_tool_tmp" 'C:\Users\builder\workspace\iree-build' 'C:\Users\builder\workspace\iree' >/dev/null 2>&1; then
-    echo "FAIL: a missing llvm-objcopy caused the leak to be silently exempted" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
-  else
-    echo "ok: missing llvm-objcopy does not fail open -- leak still caught"
-  fi
+  echo "ok: no COFF strip tool on PATH does not fail open -- leak still caught"
 fi
+PATH="$old_path"
 rm -rf "$missing_tool_tmp"
+
+# Case B: llvm-objcopy exists on PATH but fails -- the more realistic
+# failure mode (a tool that's present but can't parse the input) -- must
+# also not cause an exemption.
+cat > "$shim_dir/llvm-objcopy" <<'SHIM'
+#!/bin/sh
+exit 1
+SHIM
+chmod +x "$shim_dir/llvm-objcopy"
+failing_tool_tmp="$(mktemp -d)"; mkdir -p "$failing_tool_tmp/lib"
+printf 'C:\\Users\\builder\\workspace\\iree-build\\junk\n' > "$failing_tool_tmp/lib/leaky.obj"
+PATH="$shim_dir"
+if RELOC_ALLOW_DEBUG_PATHS=1 relocatability_assert "$failing_tool_tmp" 'C:\Users\builder\workspace\iree-build' 'C:\Users\builder\workspace\iree' >/dev/null 2>&1; then
+  echo "FAIL: a present-but-failing llvm-objcopy caused the leak to be silently exempted" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+else
+  echo "ok: a present-but-failing llvm-objcopy does not fail open -- leak still caught"
+fi
+PATH="$old_path"
+rm -rf "$failing_tool_tmp" "$shim_dir"
 
 exit "$ASSERT_FAILS"
