@@ -13,6 +13,16 @@ PREFIX="$(cd "${1:?usage: run.sh <prefix>}" && pwd)"
 build="$(mktemp -d)"
 trap 'rm -rf "$build"' EXIT
 
+# The Linux gate gets "never seen the build tree" from a container; the Windows
+# gate gets it from the job boundary. Assert it explicitly so the property is
+# testable on both rather than implied by the container on one.
+for forbidden in "$PWD/iree" "$PWD/../iree" "$PWD/iree-build-default"; do
+  if [ -e "$forbidden" ]; then
+    echo "FAIL: consumer gate can reach '$forbidden'; it must run with no IREE source or build tree" >&2
+    exit 1
+  fi
+done
+
 mode="$(consumer_run_mode "$PREFIX")"
 echo "==> consumer run mode: $mode"
 
@@ -29,13 +39,30 @@ if [ "$mode" = "tsan" ]; then
 fi
 
 echo "==> configuring consumer against $PREFIX"
+# CMake 4.x no longer searches <prefix>/lib/cmake/ from CMAKE_PREFIX_PATH, so
+# the package's own _DIR must be set explicitly. This is correct on 3.x too,
+# so no version/platform branch is needed.
 cmake -G Ninja -B "$build" -S "$HERE" \
   -DCMAKE_PREFIX_PATH="$PREFIX/lib/cmake/IreeRuntimeDist" \
+  -DIreeRuntimeDist_DIR="$PREFIX/lib/cmake/IreeRuntimeDist" \
   -DCMAKE_BUILD_TYPE=Release \
   "${compiler_args[@]}"
 
 echo "==> building consumer"
 cmake --build "$build"
+
+# MSVC/Ninja on Windows produces consumer.exe; other platforms produce
+# consumer with no suffix. Resolve whichever one the build actually made
+# rather than assuming a platform from uname, so this stays correct if the
+# generator or toolchain changes.
+exe="$build/consumer"
+if [ ! -x "$exe" ] && [ -x "$exe.exe" ]; then
+  exe="$exe.exe"
+fi
+if [ ! -x "$exe" ]; then
+  echo "FAIL: consumer binary not found at $build/consumer(.exe) after build" >&2
+  exit 1
+fi
 
 vmfb="$PREFIX/share/iree-runtime-dist/add.vmfb"
 if [ ! -s "$vmfb" ]; then
@@ -53,7 +80,7 @@ if [ "$mode" = "tsan" ]; then
   if [ -f "$PREFIX/share/iree-runtime-dist/tsan.supp" ]; then
     supp="suppressions=$PREFIX/share/iree-runtime-dist/tsan.supp"
   fi
-  if out="$(TSAN_OPTIONS="halt_on_error=1 $supp" "$build/consumer" "$vmfb" local-task 2>&1)"; then
+  if out="$(TSAN_OPTIONS="halt_on_error=1 $supp" "$exe" "$vmfb" local-task 2>&1)"; then
     if echo "$out" | grep -q "ThreadSanitizer:"; then
       echo "$out"
       echo "FAIL: tsan reported a race over local-task" >&2
@@ -78,7 +105,7 @@ else
   # (driver_module.c), so "local-sync://" would fail to resolve.
   for driver in "local-sync" "local-task"; do
     echo "==> running with $driver"
-    if "$build/consumer" "$vmfb" "$driver"; then
+    if "$exe" "$vmfb" "$driver"; then
       echo "ok: $driver"
     else
       echo "FAIL: consumer failed with $driver" >&2
