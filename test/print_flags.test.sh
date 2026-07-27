@@ -46,6 +46,23 @@ case "$wf" in
   *) echo "ok: /d1trimfile: carries a non-empty prefix" ;;
 esac
 
+# Passing -DCMAKE_<LANG>_FLAGS on the cmake command line REPLACES the value
+# CMake's platform module initialised rather than adding to it. On MSVC that
+# default carries /EHsc (and /GR), so clobbering it makes every C++ TU that
+# includes <ostream> fail C4530, which IREE's -WX escalates to an error --
+# observed for real in run 30281540210, 322 objects into a 40-minute build, on
+# third_party/benchmark. build-runtime.sh restates those defaults; assert they
+# are actually there, per language, so a future edit that drops them fails here
+# in a second instead of in CI.
+cxx="$(printf '%s\n' "$wf" | grep '^compiler_flags_cxx: ' || true)"
+cc="$(printf '%s\n' "$wf" | grep '^compiler_flags: ' || true)"
+assert_contains "$cxx" "-EHsc" "windows C++ flags keep the /EHsc default cmake would have set"
+assert_contains "$cxx" "-GR"   "windows C++ flags keep the /GR default cmake would have set"
+assert_contains "$cxx" "d1trimfile" "windows C++ flags still trim __FILE__"
+assert_contains "$cc"  "d1trimfile" "windows C flags still trim __FILE__"
+# -EHsc is a C++-only option; cl warns on it for a C translation unit.
+case "$cc" in *-EHsc*) echo "FAIL: -EHsc leaked into the C flags" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1));; *) echo "ok: no -EHsc in C flags";; esac
+
 lf="$(bash "$here/../build-runtime.sh" --print-flags --variant default --platform linux-x86_64)"
 assert_contains "$lf" "-ffile-prefix-map" "linux keeps its own prefix map"
 case "$lf" in *d1trimfile*) echo "FAIL: MSVC-only flag leaked into linux flags" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1));; *) echo "ok: no MSVC flag on linux";; esac

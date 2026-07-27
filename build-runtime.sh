@@ -84,12 +84,26 @@ known_platforms | grep -qx "$PLATFORM" \
 # provenance use the identical string.
 VARIANT_CFLAGS="$(variant_cflags "$VARIANT")"
 
+# CMAKE_C_FLAGS / CMAKE_CXX_FLAGS are assembled per language, because on MSVC
+# they cannot be the same string. Passing -DCMAKE_<LANG>_FLAGS on the command
+# line REPLACES the value CMake's platform module initialised, it does not add
+# to it -- and on Windows that default is load-bearing: Windows-MSVC.cmake
+# seeds CXX with `/DWIN32 /D_WINDOWS /GR /EHsc`. Clobbering it silently drops
+# /EHsc, and every C++ translation unit that touches <ostream> then fails
+# C4530 ("C++ exception handler used, but unwind semantics are not enabled"),
+# which IREE's own -WX turns into an error. That is a real observed failure,
+# not a hypothetical: run 30281540210 died 322 objects in, on
+# third_party/benchmark, for exactly this reason. On Linux the initialised
+# default is empty, so the same clobber costs nothing -- which is why this
+# only ever showed up on Windows.
 if [ "$(platform_toolchain "$PLATFORM")" = container ]; then
   # -ffile-prefix-map keeps __FILE__ (which IREE embeds in status strings) and
   # DWARF DW_AT_comp_dir relative, so published artifacts carry no
   # build-machine paths. clang/gcc-only -- not understood by cl.exe.
   PREFIX_MAP="-ffile-prefix-map=${IREE_SRC}=iree"
   COMPILER_FLAGS="$PREFIX_MAP${VARIANT_CFLAGS:+ $VARIANT_CFLAGS}"
+  COMPILER_FLAGS_C="$COMPILER_FLAGS"
+  COMPILER_FLAGS_CXX="$COMPILER_FLAGS"
 elif [ -n "$IREE_SRC" ]; then
   # Windows: /d1trimfile: is MSVC's -ffile-prefix-map analog -- verified
   # working on the pinned CI toolset (cl 19.44.35228, VS 2022): baseline
@@ -118,6 +132,20 @@ elif [ -n "$IREE_SRC" ]; then
   TRIMFILE_FLAG="/d1trimfile:${_trimfile_src}\\"
   COMPILER_FLAGS="$TRIMFILE_FLAG${VARIANT_CFLAGS:+ $VARIANT_CFLAGS}"
 
+  # Restate the platform defaults we are about to clobber (see the comment
+  # above the toolchain branch). These mirror CMake's Windows-MSVC.cmake
+  # initialisation, minus /W3 -- IREE sets its own /W4, so restating a weaker
+  # warning level would only fight it. Dash spelling (-EHsc, not /EHsc): cl
+  # accepts both, and a leading `/` is what MSYS2 would try to path-convert.
+  # If CMake ever changes these defaults this string is the thing to update;
+  # test/print_flags.test.sh asserts -EHsc is present precisely so that a
+  # future edit dropping it fails hermetically instead of 322 objects into a
+  # 40-minute CI build.
+  MSVC_PLATFORM_DEFAULTS_C='-DWIN32 -D_WINDOWS'
+  MSVC_PLATFORM_DEFAULTS_CXX='-DWIN32 -D_WINDOWS -GR -EHsc'
+  COMPILER_FLAGS_C="$MSVC_PLATFORM_DEFAULTS_C $COMPILER_FLAGS"
+  COMPILER_FLAGS_CXX="$MSVC_PLATFORM_DEFAULTS_CXX $COMPILER_FLAGS"
+
   # This script runs under Git-Bash (MSYS2) on Windows, and MSYS2 rewrites
   # arguments that LOOK like POSIX paths into Windows paths before handing them
   # to a native .exe. That is exactly what makes `-S /d/a/.../iree` work for
@@ -140,14 +168,20 @@ else
   # prefix-less one; a real build always supplies --iree-src (enforced
   # below), so this branch is --print-flags-only and never reaches cmake.
   COMPILER_FLAGS="${VARIANT_CFLAGS:-}"
+  COMPILER_FLAGS_C="$COMPILER_FLAGS"
+  COMPILER_FLAGS_CXX="$COMPILER_FLAGS"
 fi
 
 if [ "$PRINT_FLAGS" -eq 1 ]; then
   effective_cmake_flags "$VARIANT" "$PLATFORM"
   # --print-flags must emit cmake arguments and nothing else -- this output
   # feeds BUILDINFO/manifest.json provenance, and the next task derives
-  # `crt` by grepping it. No decorative/cosmetic lines here.
-  echo "compiler_flags: $COMPILER_FLAGS"
+  # `crt` by grepping it. No decorative/cosmetic lines here. Both languages
+  # are reported because they genuinely differ on MSVC, and provenance that
+  # showed only one of them would under-report what the archives were built
+  # with.
+  echo "compiler_flags: $COMPILER_FLAGS_C"
+  echo "compiler_flags_cxx: $COMPILER_FLAGS_CXX"
   exit 0
 fi
 
@@ -290,8 +324,8 @@ cmake -G Ninja -B "$BUILD_DIR" -S "$IREE_SRC" \
   -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DCMAKE_INSTALL_LIBDIR=lib \
   "${TOOLCHAIN_ARGS[@]}" \
-  -DCMAKE_C_FLAGS="$COMPILER_FLAGS" \
-  -DCMAKE_CXX_FLAGS="$COMPILER_FLAGS"
+  -DCMAKE_C_FLAGS="$COMPILER_FLAGS_C" \
+  -DCMAKE_CXX_FLAGS="$COMPILER_FLAGS_CXX"
 
 echo "==> building"
 cmake --build "$BUILD_DIR"
