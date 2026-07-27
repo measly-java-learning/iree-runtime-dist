@@ -74,7 +74,10 @@ empty or half-broken package.
 `scripts/lib/*.sh` are sourced by both the build and CI so the two cannot drift. When changing
 what they define, change it there, not at a call site. `effective_cmake_flags` in particular
 feeds the build, `--print-flags`, and `BUILDINFO`/`manifest.json` provenance, so recorded
-provenance cannot diverge from the build that produced it.
+provenance cannot diverge from the build that produced it. It takes both `<variant>` and
+`<platform>` (e.g. Windows' `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` is platform-keyed, not
+variant-keyed) — the static-CRT choice must be greppable in its output rather than smuggled in
+via a raw `CMAKE_C_FLAGS` string, since a later task derives manifest.json's `crt` field from it.
 
 Not every platform is containerised. `platform_toolchain()` in `naming.sh` classifies each
 platform as `container` or `runner`. Container platforms (all Linux) take their toolchain from

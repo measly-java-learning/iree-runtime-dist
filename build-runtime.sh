@@ -90,35 +90,50 @@ if [ "$(platform_toolchain "$PLATFORM")" = container ]; then
   # build-machine paths. clang/gcc-only -- not understood by cl.exe.
   PREFIX_MAP="-ffile-prefix-map=${IREE_SRC}=iree"
   COMPILER_FLAGS="$PREFIX_MAP${VARIANT_CFLAGS:+ $VARIANT_CFLAGS}"
-else
+elif [ -n "$IREE_SRC" ]; then
   # Windows: /d1trimfile: is MSVC's -ffile-prefix-map analog -- verified
   # working on the pinned CI toolset (cl 19.44.35228, VS 2022): baseline
-  # __FILE__ "C:\trimtest\sub\foo.c" became "sub\foo.c". Unlike
+  # __FILE__ "C:\trimtest\sub\foo.c" became "sub\foo.c" using the probe
+  # `-d1trimfile:C:\trimtest\` -- ONE trailing backslash, not doubled. Unlike
   # -ffile-prefix-map it TRIMS A PREFIX rather than remapping to a token, so
-  # the prefix must be the source root WITH a trailing backslash or the last
-  # path component gets glued onto the following relative path.
+  # the prefix must be the source root WITH that trailing backslash or the
+  # last path component gets glued onto the following relative path.
   #
-  # That trailing backslash is doubled deliberately, not a typo: this string
-  # ultimately gets re-quoted by CMake into a double-quoted cl.exe argument,
-  # and the Windows CRT's argv parser treats an ODD run of backslashes
-  # immediately before a closing '"' as an escaped literal quote rather than
-  # the string terminator -- corrupting the rest of the command line. An
-  # EVEN run (two backslashes here) parses as one literal trailing backslash
-  # followed by a real closing quote, which is what we want.
-  TRIMFILE_FLAG="/d1trimfile:${IREE_SRC}\\\\"
+  # cl.exe bakes __FILE__ in as a Windows path (C:\...), but this recipe
+  # runs under Git-Bash on the actual Windows runner, so $IREE_SRC arrives
+  # as a POSIX-style mount path (e.g. /c/Users/cored/workspace/iree).
+  # /d1trimfile: only trims a LITERAL prefix match against what cl.exe
+  # actually emits -- a POSIX-flavoured prefix matches nothing and silently
+  # leaves every absolute __FILE__ path in the shipped archives, the same
+  # silent-no-op failure mode this whole guard exists to avoid. Convert with
+  # cygpath -w (Git-Bash-provided) when it's on PATH; when it isn't (e.g.
+  # this script's hermetic --print-flags tests, which run on a non-Windows
+  # host to exercise flag assembly only) fall back to the raw value -- that
+  # value is never fed to a real cl.exe in that case.
+  if command -v cygpath >/dev/null 2>&1; then
+    _trimfile_src="$(cygpath -w "$IREE_SRC")"
+  else
+    _trimfile_src="$IREE_SRC"
+  fi
+  TRIMFILE_FLAG="/d1trimfile:${_trimfile_src}\\"
   COMPILER_FLAGS="$TRIMFILE_FLAG${VARIANT_CFLAGS:+ $VARIANT_CFLAGS}"
+else
+  # --print-flags is documented to need no source tree, so IREE_SRC may be
+  # empty here. A /d1trimfile: with an EMPTY prefix trims nothing -- every
+  # archive would keep its absolute __FILE__ paths while the build looks
+  # configured correctly, exactly the silent-no-op class this branch has
+  # already hit twice. Omit the flag entirely rather than emit a
+  # prefix-less one; a real build always supplies --iree-src (enforced
+  # below), so this branch is --print-flags-only and never reaches cmake.
+  COMPILER_FLAGS="${VARIANT_CFLAGS:-}"
 fi
 
 if [ "$PRINT_FLAGS" -eq 1 ]; then
   effective_cmake_flags "$VARIANT" "$PLATFORM"
+  # --print-flags must emit cmake arguments and nothing else -- this output
+  # feeds BUILDINFO/manifest.json provenance, and the next task derives
+  # `crt` by grepping it. No decorative/cosmetic lines here.
   echo "compiler_flags: $COMPILER_FLAGS"
-  # Human-readable annotation only -- NOT fed to cmake (the actual static-CRT
-  # cache var, -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded, is already in the
-  # effective_cmake_flags output above; that's the one manifest.json derives
-  # `crt` from). This line just spells out the /MT it corresponds to.
-  if [ "$(platform_toolchain "$PLATFORM")" != container ]; then
-    echo "static_crt: /MT (via -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded)"
-  fi
   exit 0
 fi
 
