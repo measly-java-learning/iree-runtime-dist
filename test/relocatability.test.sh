@@ -269,4 +269,77 @@ fi
 PATH="$old_path"
 rm -rf "$failing_tool_tmp" "$shim_dir"
 
+# --- -natvis: absolute path repair (Task 9) ----------------------------------
+# -natvis: carries an absolute SOURCE path into INTERFACE_LINK_LIBRARIES, so a
+# consumer on any other machine gets a dangling flag on their link line. A .cmake
+# file is a text file and is never exempt from the assertion.
+nat="$(mktemp -d)"; mkdir -p "$nat/lib/cmake/IREE"
+cat > "$nat/lib/cmake/IREE/IREETargets-Runtime.cmake" <<'X'
+set_target_properties(iree_runtime_impl PROPERTIES
+  INTERFACE_LINK_LIBRARIES "flatcc_parsing;-natvis:C:/Users/builder/workspace/iree/runtime/iree.natvis;-pdbpagesize:32768"
+)
+X
+relocatability_repair "$nat" 'C:\Users\builder\workspace\iree-build' 'C:/Users/builder/workspace/iree'
+if grep -q 'natvis:C:' "$nat/lib/cmake/IREE/IREETargets-Runtime.cmake"; then
+  echo "FAIL: -natvis: absolute path survived the repair" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+else
+  echo "ok: -natvis: absolute path repaired"
+fi
+# The repair must be surgical: sibling entries stay intact.
+assert_contains "$(cat "$nat/lib/cmake/IREE/IREETargets-Runtime.cmake")" "flatcc_parsing"     "sibling link entry untouched"
+assert_contains "$(cat "$nat/lib/cmake/IREE/IREETargets-Runtime.cmake")" "-pdbpagesize:32768" "sibling linker flag untouched"
+# No empty list element (doubled ';;' or stray leading/trailing ';' next to
+# the surrounding quotes) left behind.
+got_nat="$(cat "$nat/lib/cmake/IREE/IREETargets-Runtime.cmake")"
+if printf '%s' "$got_nat" | grep -Eq -- ';;|"[[:space:]]*;|;[[:space:]]*"'; then
+  echo "FAIL: -natvis: repair left an empty list element" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+else
+  echo "ok: -natvis: repair left no empty list element"
+fi
+assert_contains "$got_nat" 'INTERFACE_LINK_LIBRARIES "flatcc_parsing;-pdbpagesize:32768"' "-natvis: entry cleanly excised"
+
+# Idempotency: a second repair pass on an already-repaired file is a no-op.
+before_nat="$got_nat"
+relocatability_repair "$nat"
+after_nat="$(cat "$nat/lib/cmake/IREE/IREETargets-Runtime.cmake")"
+if [ "$before_nat" = "$after_nat" ]; then
+  echo "ok: -natvis: repair is idempotent"
+else
+  echo "FAIL: second -natvis: repair pass changed output" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+fi
+rm -rf "$nat"
+
+# Real leaks observed in the wild use forward slashes (CMake normalises export
+# paths), but a raw backslash-separated Windows path must be caught too.
+natbs="$(mktemp -d)"; mkdir -p "$natbs/lib/cmake/IREE"
+printf 'set_target_properties(iree_runtime_impl PROPERTIES\n  INTERFACE_LINK_LIBRARIES "flatcc_parsing;-natvis:C:\\\\Users\\\\builder\\\\workspace\\\\iree\\\\runtime\\\\iree.natvis;-pdbpagesize:32768"\n)\n' \
+  > "$natbs/lib/cmake/IREE/IREETargets-Runtime.cmake"
+relocatability_repair "$natbs"
+got_natbs="$(cat "$natbs/lib/cmake/IREE/IREETargets-Runtime.cmake")"
+case "$got_natbs" in
+  *'natvis:C:'*)
+    echo "FAIL: backslash-style -natvis: absolute path survived the repair" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)) ;;
+  *) echo "ok: backslash-style -natvis: absolute path repaired" ;;
+esac
+assert_contains "$got_natbs" "flatcc_parsing"     "backslash case: sibling link entry untouched"
+assert_contains "$got_natbs" "-pdbpagesize:32768" "backslash case: sibling linker flag untouched"
+rm -rf "$natbs"
+
+# A fixture with no -natvis: entry at all must be left byte-identical.
+clean_nat="$(mktemp -d)"; mkdir -p "$clean_nat/lib/cmake/IREE"
+cat > "$clean_nat/lib/cmake/IREE/IREETargets-Runtime.cmake" <<'X'
+set_target_properties(iree_runtime_impl PROPERTIES
+  INTERFACE_LINK_LIBRARIES "flatcc_parsing;-pdbpagesize:32768"
+)
+X
+sha_before="$(sha256sum "$clean_nat/lib/cmake/IREE/IREETargets-Runtime.cmake" | cut -d' ' -f1)"
+relocatability_repair "$clean_nat"
+sha_after="$(sha256sum "$clean_nat/lib/cmake/IREE/IREETargets-Runtime.cmake" | cut -d' ' -f1)"
+if [ "$sha_before" = "$sha_after" ]; then
+  echo "ok: fixture without -natvis: left byte-identical"
+else
+  echo "FAIL: fixture without -natvis: was modified" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+fi
+rm -rf "$clean_nat"
+
 exit "$ASSERT_FAILS"

@@ -48,6 +48,31 @@ relocatability_repair() { # <prefix>
       | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS/s#-I/[^;"]*;?##g'
     find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
       | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS[[:space:]]*""[[:space:]]*$/d'
+
+    # Windows exports carry a "-natvis:<abs-src-path>" entry inside
+    # iree_runtime_impl's INTERFACE_LINK_LIBRARIES -- a Visual Studio
+    # debugger visualiser pointing at iree.natvis in the builder's source
+    # tree. It is never shipped in the prefix, so removal is the correct
+    # repair, not rewriting to a relative path: a .natvis a consumer doesn't
+    # have is equally useless whether the path is absolute or relative, and
+    # a relative path would still dangle on their link line. Drive-letter
+    # notation (X:) is what makes the path absolute on Windows; CMake
+    # normalizes the export file to forward slashes but match both slash
+    # styles defensively. Only entries whose path is absolute are matched --
+    # siblings (real targets, other linker flags) are left untouched, and
+    # the surrounding ';' is consumed with the entry so no doubled ';;' or
+    # empty list element is left behind. grep -q gates the sed so a second
+    # pass over an already-repaired file is a no-op (idempotent).
+    find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
+      | while IFS= read -r -d '' f; do
+          if grep -Eq -- '-natvis:[A-Za-z]:[/\\]' "$f"; then
+            sed -i -E \
+              -e 's/;-natvis:[A-Za-z]:[/\\][^;"]*//g' \
+              -e 's/-natvis:[A-Za-z]:[/\\][^;"]*;//g' \
+              -e 's/-natvis:[A-Za-z]:[/\\][^;"]*//g' \
+              "$f"
+          fi
+        done
   fi
 
   # Build-tree metadata must never ship.
