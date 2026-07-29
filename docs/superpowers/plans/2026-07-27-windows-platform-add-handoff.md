@@ -134,6 +134,23 @@ is a false provenance claim.
 
 ## After the release ships — fast-follow, in order
 
+> **Reordered 2026-07-29.** A strategic reframe landed after this plan was written:
+> [`notes/2026-07-29-package-port-regime.md`](../notes/2026-07-29-package-port-regime.md) treats
+> this repo as a **package port** and replaces the flag-assembly machinery with `cmake -C`
+> cache-init files, source patches, observed provenance, and a frozen header list. Five decisions
+> are recorded there and all its open questions are closed.
+>
+> **What this changes about the order below and about §1 above.** §1 (the unimplemented Windows
+> `verify` leg) is now *downstream* of the reframe, not the next thing: under the job split it is a
+> job you write straight rather than more `if: matrix.toolchain` branches, and under `cmake -C` the
+> flag plumbing it would have threaded no longer exists. Do the reframe's sequencing steps 1–2
+> before §1, or §1 gets written twice. Item (1) below stays first among the items in this section —
+> it is orthogonal to the reframe and unblocks both.
+>
+> Also read
+> [`notes/2026-07-29-compiler-version-is-not-a-c-compiler.md`](../notes/2026-07-29-compiler-version-is-not-a-c-compiler.md)
+> **before touching `release.yml`** — there is a TODO comment in it that prescribes the wrong fix.
+
 1. **Matrix simplification** —
    [`notes/2026-07-27-gha-matrix-simplification.md`](../notes/2026-07-27-gha-matrix-simplification.md).
    Split `build`/`verify` into Linux and Windows jobs, scan disk instead of enumerating, and
