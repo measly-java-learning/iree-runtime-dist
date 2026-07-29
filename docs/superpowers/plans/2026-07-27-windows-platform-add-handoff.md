@@ -16,13 +16,20 @@ below — it is written to be actionable without reading the rest of this file.
 
 ### 1. Implement the `verify` job's Windows leg (blocks everything else)
 
-`verify` is half-migrated and currently cannot pass on Windows. Two distinct problems:
+`verify` is half-migrated and currently cannot pass on Windows. Three problems, settled in
+order:
 
-- **It fails at the Extract step**, for a reason unrelated to Windows correctness — the step
-  never receives the asset in a usable shape. The Windows tarball is `.tar.gz` like every other
-  platform, so extraction goes through Git-Bash `tar -xzf`, not the container path.
-- **Behind that failure sit Docker build/push steps** that would run on a Windows runner if
-  Extract ever succeeded.
+1. **"Verify checksum" and "Extract" both fail on Windows** — neither step sets `shell: bash`,
+   so the Windows runner's default shell (pwsh) receives the commands. pwsh does not
+   glob-expand `*` in arguments to external commands, so `sha256sum` gets the literal string
+   `./*.sha256` and `tar.exe` gets the literal string `assets/*.tar.gz`. The fix is
+   `shell: bash` on both steps. The artifact IS downloaded correctly; this is purely a
+   shell/globbing mismatch.
+2. **Behind that sit Docker-dependent steps with no toolchain gate** — "Resolve build image
+   identity", `docker/setup-buildx-action`, `docker/build-push-action`, and "Consumer e2e in a
+   clean container" all run unconditionally and would fail on a Windows runner. Every one
+   needs `if: matrix.toolchain == 'container'`, exactly matching the build job's guards.
+3. **No runner-native verify path exists** — gating alone is wrong (see below).
 
 The previous implementer deliberately left the Docker steps ungated, reasoning that gating them
 would make the Windows leg green having done nothing. That instinct is right — see "the
@@ -31,19 +38,40 @@ implementing the runner-native path is right.** Leaving it broken is not a safe 
 
 What the leg must actually do:
 
-- Container-gate the Docker steps (`platform_toolchain <platform>` returns `container`|`runner`).
+- Add `shell: bash` to the shared "Verify checksum" and "Extract" steps (problems 1).
+- Container-gate the Docker-dependent steps with `if: matrix.toolchain == 'container'`
+  (problem 2). The four steps that need it: "Resolve build image identity",
+  `docker/setup-buildx-action`, "Build the pinned toolchain image", and "Consumer e2e in a
+  clean container". ("Lower ASLR entropy" is already gated on `tsan`, which cannot occur on
+  Windows, so it self-gates.)
 - Add a runner-native path using the vswhere → `Launch-VsDevShell.ps1 -Arch amd64
   -SkipAutomaticLocation` → Git-Bash pattern already proven in the build job.
 - **Actually run the consumer acceptance gate.** `test/consumer/` works on Windows (Task 11) and
   passes against a real package with both drivers. Verify is where that must run in CI, on a
   fresh runner that never checks out IREE — the job boundary is Windows's substitute for the
   container's isolation.
-- Extend the `workflow_paths.test.sh` guard that already exists for the build job: a runner-gated
-  verify leg must actually invoke the consumer gate, so a future conditional cannot silently skip
-  it.
+- Extend `test/workflow_paths.test.sh` with three checks mirroring the ones it already runs
+  against the build job:
+  1. **Every Docker-dependent verify step is gated on `matrix.toolchain == 'container'`.**
+     Match on the same patterns the build check uses: `docker/` in `uses:`, `docker run` in
+     `run:`, and `build_image_tag`/`build_dockerfile` in `run:`.
+  2. **A runner-toolchain verify step actually invokes `test/consumer/run.sh`.** The build
+     check asserts a runner step calls `build-runtime.sh`; the verify check asserts a runner
+     step calls `test/consumer/run.sh`. This is the same defect class: a future conditional
+     that silently skips the only thing that matters.
+  3. **Every shared (ungated) verify step whose `run:` calls bash tooling sets
+     `shell: bash`.** The build check already does this; extend the loop to cover the verify
+     job's steps too. Without it, the "Verify checksum" and "Extract" steps would regress
+     the moment someone adds a new shared step.
 
-Run this on a temporary hard-gated branch trigger first (see "How the trial run was done"), not a
-tag.
+Run this on a temporary branch trigger first (see "How the trial run was done"), not a tag.
+
+**Trial gating for verify work.** The trial-run pattern gates `pin` and `release` at the job
+level with `if: startsWith(github.ref, 'refs/tags/')`. The `attest` step is in the **build**
+job, not a separate job, so gating it means adding the condition to that step within the
+build job. For the verify trial, you want build (including attest) and verify to run freely
+while pin+release stay locked to tags. The trigger is a temporary
+`push: branches: ['feat/windows-platform-add']` at the top of `release.yml`.
 
 ### 2. Revisit the relocatability bar — the Task 3 decision was made on a false premise
 
@@ -75,6 +103,23 @@ carries the authorisation.
 
 It was tag-gated during the 12c trials, so it is unexercised on `windows-2022`.
 
+The attest step lives in the **build** job (step 12, `subject-path: dist/assets/*.tar.gz`),
+not the verify job. It is ungated — it runs on every platform, including Windows, on any
+workflow trigger that reaches the build job. Two concerns:
+
+- **Glob resolution on Windows.** `subject-path` takes a glob, and the action resolves it
+  internally. Whether it handles backslash paths or pwsh-style globbing on a Windows runner
+  is unknown — it has literally never executed there.
+- **Cascade to the release notes.** The release job's rendered notes instruct consumers to
+  run `gh attestation verify ${tb}` for every variant/platform, including Windows. If
+  attestation silently fails or produces no attestation for the Windows tarball, the release
+  notes are a false claim. A loud failure (build job goes red) is acceptable; a silent
+  absence is not.
+
+**Add a negative control:** after the first successful Windows attestation run, temporarily
+break the subject-path glob (e.g. point it at a file that doesn't exist) and confirm the
+build job goes red. This is the same discipline as 12b's deliberately-wrong compiler version.
+
 ### 4. Then, and only then: 12d — the real tagged release
 
 Cut a real tag and confirm the published assets: both Linux platforms × both variants, plus
@@ -84,6 +129,26 @@ acceptable (`linux-aarch64` took five).
 Confirm the Task 6 obligation holds: `notes.msvc_toolset` asserts the archives were built on a
 **pinned** `windows-2022` image. The build job pins it; verify and release must too, or the note
 is a false provenance claim.
+
+---
+
+## After the release ships — fast-follow, in order
+
+1. **Matrix simplification** —
+   [`notes/2026-07-27-gha-matrix-simplification.md`](../notes/2026-07-27-gha-matrix-simplification.md).
+   Split `build`/`verify` into Linux and Windows jobs, scan disk instead of enumerating, and
+   rewrite the CLAUDE.md sections that currently encode the removed design as doctrine.
+2. **Post-mortem remedies** —
+   [`notes/2026-07-27-windows-add-postmortem.md`](../notes/2026-07-27-windows-add-postmortem.md).
+   Design-doc habits, principally: read a named reference's *topology* before its facts, and
+   state its scope of authority up front.
+3. **Org-wide standards review** —
+   [`notes/2026-07-27-org-standards-review-fastfollow.md`](../notes/2026-07-27-org-standards-review-fastfollow.md).
+   All four production repos, not just the two `*-runtime-dist` instances. Gated on (1) and (2)
+   so the review does not codify the shape being remediated.
+
+Item 1 also makes §1 above substantially smaller, but §1 is not blocked on it — sequence by
+whichever is ready.
 
 ---
 
