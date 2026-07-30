@@ -66,15 +66,15 @@ One `-C` file per axis: universal, platform, variant. `CMAKE_INSTALL_PREFIX` is 
 | File | Contents |
 |---|---|
 | `cmake/dist-set.cmake` | The `dist_set()` macro (below). Included by each of the others. |
-| `cmake/common.cmake` | 18 declared entries: the 11 from `common_flags()` plus the 7 from `_runtime_capability_flags()`. Does not touch `CMAKE_C_FLAGS`/`CMAKE_CXX_FLAGS`. |
-| `cmake/gnu-toolchain.cmake` | `-ffile-prefix-map=$ENV{IREE_SRC}=iree` into `CMAKE_C_FLAGS`/`CMAKE_CXX_FLAGS`. Composed here, once, where the path is known — these flags are path-dependent by construction, which is why they cannot live in `common.cmake`. |
+| `cmake/common.cmake` | 19 declared entries: the 11 from `common_flags()`, the 7 from `_runtime_capability_flags()`, and `CMAKE_INSTALL_LIBDIR=lib` (today a bare `-D` at the `cmake` call, and not per-invocation). Does not touch `CMAKE_C_FLAGS`/`CMAKE_CXX_FLAGS`. |
+| `cmake/gnu-toolchain.cmake` | `CMAKE_C_COMPILER=clang` / `CMAKE_CXX_COMPILER=clang++`, and `-ffile-prefix-map=$ENV{IREE_SRC}=iree` into `CMAKE_C_FLAGS`/`CMAKE_CXX_FLAGS`. Composed here, once, where the path is known — these flags are path-dependent by construction, which is why they cannot live in `common.cmake`. |
 | `cmake/linux-x86_64.cmake` | One `include()` of `gnu-toolchain.cmake`. |
 | `cmake/linux-aarch64.cmake` | One `include()` of `gnu-toolchain.cmake`. |
-| `cmake/windows-x86_64.cmake` | `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`; the restated MSVC platform defaults; `/d1trimfile:$ENV{IREE_SRC_NATIVE}\`. |
+| `cmake/windows-x86_64.cmake` | `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`; `find_program(... cl REQUIRED)` for both compilers; the restated MSVC platform defaults; `/d1trimfile:$ENV{IREE_SRC_NATIVE}\`. |
 | `cmake/variant-default.cmake` | Deliberately declares no compiler flags. Present, with a comment saying why an empty file is correct rather than missing. |
 | `cmake/variant-tsan.cmake` | Appends `-fsanitize=thread -g` (`FORCE`, per finding 2), with the why-not-`RelWithDebInfo` rationale. |
 
-Putting all 18 capability and build-type entries in one file makes the "`default` and `tsan` cannot
+Putting every capability and build-type entry in one file makes the "`default` and `tsan` cannot
 drift on capability" property structural in the strongest available form: there is only one file
 that can state them, and neither variant file can reach them.
 
@@ -82,6 +82,19 @@ The two Linux platform files are one line each rather than one shared `cmake/lin
 `-C` path is derived directly from the platform token with no platform→file mapping in shell. A
 missing file is a loud `cmake` error. Adding a platform is adding a file — the same shape as
 "adding a container platform is a Dockerfile plus a `PLATFORMS` entry".
+
+### Compiler selection moves too
+
+`TOOLCHAIN_ARGS` at `build-runtime.sh:320` currently branches on `platform_toolchain()` — a
+function the baseline commit already deleted — to pick `clang`/`clang++` versus `cl`. That branch
+becomes two lines in the two toolchain files, which also resolves the standing `TODO` beside it
+noting that a future macOS platform would use clang *without* being containerised: the scissor was
+never container-vs-runner, it was which compiler, and a per-platform file states that directly.
+
+Windows uses `find_program(CL_EXE NAMES cl REQUIRED)` rather than a `command -v cl` guard, per the
+presets note's retained finding. `REQUIRED` fails at configure with CMake's own diagnostic, and the
+resolved absolute path is what lands in the cache — so recorded provenance names the exact `cl`
+used, not whatever `PATH` resolved at the time.
 
 ### `cygpath` stays in shell
 
@@ -161,7 +174,8 @@ we declared, which is the only interesting case.
 | `runtime_commit` | computed twice (`gen-manifest.sh:20`, `build-runtime.sh:594`) | once, in `gen-manifest.sh` |
 | `cmake_version` | absent | `CMAKE_CACHE_{MAJOR,MINOR,PATCH}_VERSION` from the cache |
 | `runtime_dist_commit` | absent | `git describe --always --dirty` on this repo |
-| `iree_compiler_version` | `compiler_version` | renamed; still the `iree-base-compiler` wheel version |
+| `iree_compile_version` | published key | **unchanged.** Only the internal shell name `COMPILER_VERSION` → `IREE_COMPILER_VERSION` |
+| `clang_version` | absent | `clang --version \| head -1`, parsed beside `msvc_toolset`, `linux-*`-conditional |
 | `glibc_build`, `msvc_toolset` | observed | unchanged — these are the model the rest now matches |
 
 `cmake_version` comes from the cache rather than a separate `cmake --version` call for the same
@@ -173,6 +187,12 @@ Phase-3 template step at `build-runtime.sh:593` reads it back out of the just-em
 manifest is generated 23 lines earlier — and it makes template and manifest provably agree instead
 of coincidentally agreeing.
 
+`clang_version` closes the gap the compiler-version note identified: Linux manifests carry
+`glibc_build` but the compiler that actually built the archives is attested only indirectly, via
+the pinned NEVRAs in `docker/<platform>.Dockerfile`. Same shape as `msvc_toolset` — detected where
+the compiler lives, from the tool's own banner, `"unknown"` on failure rather than a guessed value.
+Provenance, not a compatibility claim.
+
 `runtime_dist_commit` needs the same `safe.directory` treatment `$IREE_SRC` already gets at
 `build-runtime.sh:207`: this repo is also a bind mount under a container running as root, and
 without it the call fails in CI but not on a bare host run — exactly the divergence that idiom
@@ -180,15 +200,28 @@ exists to prevent. `--dirty` matters because a local Radxa build routinely runs 
 uncommitted tree; CI is always clean, so the marker only ever annotates hand builds, which is
 where it is needed.
 
-### `schema_version: 3`
+### `schema_version` stays `2`
 
-Adding `cmake_version` and `runtime_dist_commit` is additive and would keep `2`. Renaming
-`compiler_version` → `iree_compiler_version` is not: it breaks any consumer reading the old key.
-Bump to `3`. A rename pretending to be additive is worse than an honest bump, and the sole
-consumer is a Gradle project we control. Emitting both keys with one deprecated was rejected — it
-carries the wrong name (it was never a C compiler's version) forward indefinitely.
+**Corrected 2026-07-29, after
+[2026-07-29-compiler-version-is-not-a-c-compiler.md](../notes/2026-07-29-compiler-version-is-not-a-c-compiler.md).**
+An earlier draft of this spec bumped to `3` to cover a `compiler_version` → `iree_compiler_version`
+rename. That premise was wrong: the manifest's published key is already `iree_compile_version`, and
+that note explicitly forbids renaming it — it is already unambiguous and it is schema surface. The
+rename is **internal only**: the shell/CLI name `COMPILER_VERSION` → `IREE_COMPILER_VERSION`.
 
-`manifest.test.sh` asserts the new value, the new fields, and the absence of `compiler_version`.
+So no published key changes shape. `cmake_version`, `clang_version`, and `runtime_dist_commit` are
+purely additive and break no consumer, which is the same criterion under which the
+platform-conditional `glibc_build`/`msvc_toolset`/`crt` keys were added while staying at `2`.
+Bumping with nothing broken would train consumers to ignore the number.
+
+The internal rename touches `scripts/derive-version.sh`, `.github/workflows/release.yml`,
+`scripts/gen-addvmfb.sh`, `scripts/gen-manifest.sh`, `scripts/gen-tsan-docs.sh`, and
+`build-runtime.sh`. The misleading `release.yml` TODO that note documents (proposing
+`compiler_version=$(clang --version)`) is deleted in the same pass; acting on it would replace an
+ABI-pairing version with a toolchain version under the same key.
+
+`manifest.test.sh` asserts the new fields, that `schema_version` is still `2`, and that
+`iree_compile_version` is unchanged.
 
 ### Inline Python leaves the shell
 
@@ -235,13 +268,16 @@ platform runbooks; all three are updated in the same PR.
 **Updated:**
 
 - `test/lib_variants.test.sh` — down to `known_variants` coverage
-- `test/manifest.test.sh` — new fields, `schema_version: 3`
+- `test/manifest.test.sh` — new fields; `schema_version` still `2`; `iree_compile_version` unchanged
 - `scripts/gen-manifest.sh` — new `<build-dir>` argument, no longer sources `cmakeflags.sh`, no
   inline Python
 
 **Added:** `cmake/` (8 files), `scripts/emit-manifest.py`, `test/cmake_init.test.sh`.
 - `build-runtime.sh:587` — the `gen-tsan-docs.sh` gate becomes `[ "$VARIANT" = tsan ]` rather than
   a `variant_sanitizer` test
+- `scripts/derive-version.sh`, `.github/workflows/release.yml`, `scripts/gen-addvmfb.sh`,
+  `scripts/gen-tsan-docs.sh` — the `COMPILER_VERSION` → `IREE_COMPILER_VERSION` internal rename,
+  plus deleting the misleading `release.yml` TODO
 
 ### The replacement test
 
@@ -263,7 +299,7 @@ today because there are no per-platform files yet.
 ## Validation
 
 **The acceptance gate is a cache diff.** Before changing anything, configure each affected
-combination on the baseline and capture `CMakeCache.txt` filtered to the 18 declared keys plus
+combination on the baseline and capture `CMakeCache.txt` filtered to the 19 declared keys plus
 `CMAKE_C_FLAGS`/`CMAKE_CXX_FLAGS`. After the migration, re-configure and diff. The expected diff
 is exactly:
 
@@ -313,8 +349,12 @@ rule protects rather than merely that a file exists:
   key name.
 - Variant matrix section: `variant_cflags`/`variant_sanitizer` are gone; `variants.sh` owns
   `known_variants` only.
-- manifest.json section: `schema_version: 3`, the renamed field, the new fields, and `crt`/
-  `sanitizer` now being observed.
+- manifest.json section: `schema_version` stays `2` and why (additive only); the new
+  `cmake_version`, `clang_version`, and `runtime_dist_commit` fields; and `crt`/`sanitizer`/
+  `iree_tag` now being observed rather than reconstructed. Also record that
+  `iree_compile_version` is deliberately **not** renamed despite the internal
+  `COMPILER_VERSION` → `IREE_COMPILER_VERSION` change, so the next reader doesn't
+  "finish" the rename into schema surface.
 
 `spike/windows-iree-runbook.md:89` and `spike/macos-iree-runbook.md:135` both instruct the reader to
 regenerate flags with `--print-flags`; both are rewritten to read the `cmake/` files.
