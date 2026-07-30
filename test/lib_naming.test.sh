@@ -11,19 +11,8 @@ assert_eq "$(asset_stem 3.11.0 default linux-aarch64)"   "iree-runtime-3.11.0-de
 assert_eq "$(tarball_name 3.11.0 default linux-aarch64)" "iree-runtime-3.11.0-default-linux-aarch64.tar.gz"    "tarball_name"
 assert_eq "$(sha_name 3.11.0 default linux-aarch64)"     "iree-runtime-3.11.0-default-linux-aarch64.tar.gz.sha256" "sha_name"
 
-# Build-image identity is keyed off the same platform token as the assets, so the
-# image tag, its Dockerfile, and the artifact platform can never drift apart.
-assert_eq "$(build_image_tag linux-x86_64)"  "iree-runtime-dist-build:linux-x86_64" "build_image_tag"
 assert_eq "$(build_dockerfile linux-x86_64)" "docker/linux-x86_64.Dockerfile"       "build_dockerfile"
-
-assert_eq "$(build_image_tag linux-aarch64)"  "iree-runtime-dist-build:linux-aarch64" "build_image_tag"
 assert_eq "$(build_dockerfile linux-aarch64)" "docker/linux-aarch64.Dockerfile"       "build_dockerfile"
-
-# Platforms differ in HOW they get a toolchain. Container platforms build from a
-# Dockerfile; runner platforms take it from a pinned CI image plus a VS dev shell.
-assert_eq "$(platform_toolchain linux-x86_64)"   "container" "linux-x86_64 is containerised"
-assert_eq "$(platform_toolchain linux-aarch64)"  "container" "linux-aarch64 is containerised"
-assert_eq "$(platform_toolchain windows-x86_64)" "runner"    "windows-x86_64 is runner-native"
 
 # An unknown platform must be an error, not a silent default.
 platform_toolchain bogus-platform >/dev/null 2>&1

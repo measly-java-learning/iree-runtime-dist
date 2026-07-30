@@ -1,0 +1,30 @@
+name: Checkout IREE
+description: Check out iree-org/iree at a tag with submodules
+inputs:
+  ref:
+    description: IREE git ref/tag (e.g. v3.11.0)
+    required: true
+  submodules:
+    description: Minimum set of submodules required to build IREE excluding the compiler
+    required: true
+
+# NEVER use submodules: recursive -- third_party/llvm-project alone is 2.6 GB
+# and is unnecessary with IREE_BUILD_COMPILER=OFF. The required set is the
+# tested constant in scripts/lib/submodules.sh, threaded through as
+# needs.setup.outputs.submodules.
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v7
+      with:
+        repository: iree-org/iree
+        ref: ${{ inputs.ref }}
+        submodules: false
+        path: iree
+        fetch-depth: 1
+
+    - name: Initialize submodules
+      shell: bash
+      working-directory: iree
+      run: git submodule update --init --depth 1 ${{ inputs.submodules }}
+

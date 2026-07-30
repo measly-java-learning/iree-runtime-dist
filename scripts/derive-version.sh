@@ -23,5 +23,3 @@ version="${tag#v}"       # 3.11.0-1
 version="${version%-*}"  # 3.11.0
 
 echo "IREE_VERSION=${version}"
-echo "IREE_TAG=v${version}"
-echo "COMPILER_VERSION=${version}"

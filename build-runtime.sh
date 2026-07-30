@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # Single entrypoint for the IREE runtime dist build recipe.
-#
-# Must run inside quay.io/pypa/manylinux_2_28_x86_64. Never clones IREE --
 # the caller always supplies --iree-src (CI via actions/checkout, locally a mount).
 set -euo pipefail
 
@@ -96,6 +94,9 @@ VARIANT_CFLAGS="$(variant_cflags "$VARIANT")"
 # third_party/benchmark, for exactly this reason. On Linux the initialised
 # default is empty, so the same clobber costs nothing -- which is why this
 # only ever showed up on Windows.
+# TODO: "platform_toolchan = container" is the wrong scissor
+# It's MSVC vs. not-MSVC, and we can make the assumption that
+# if it's Windows it's MSVC
 if [ "$(platform_toolchain "$PLATFORM")" = container ]; then
   # -ffile-prefix-map keeps __FILE__ (which IREE embeds in status strings) and
   # DWARF DW_AT_comp_dir relative, so published artifacts carry no
@@ -141,6 +142,9 @@ elif [ -n "$IREE_SRC" ]; then
   # test/print_flags.test.sh asserts -EHsc is present precisely so that a
   # future edit dropping it fails hermetically instead of 322 objects into a
   # 40-minute CI build.
+  # TODO: MSVC and MSYS values don't need to be buried in an `if` statement
+  # They're true even on clang, they just don't get used.  These are constants,
+  # no reason not to treat them like constants.
   MSVC_PLATFORM_DEFAULTS_C='-DWIN32 -D_WINDOWS'
   MSVC_PLATFORM_DEFAULTS_CXX='-DWIN32 -D_WINDOWS -GR -EHsc'
   COMPILER_FLAGS_C="$MSVC_PLATFORM_DEFAULTS_C $COMPILER_FLAGS"
@@ -301,6 +305,11 @@ if [ "$PLATFORM" = linux-aarch64 ] && [ "$(variant_sanitizer "$VARIANT")" = thre
 fi
 
 mapfile -t FLAGS < <(effective_cmake_flags "$VARIANT" "$PLATFORM")
+
+# TODO: This is dumb.  The macOS builds will use clang/clang++ but won't run
+# in a container.  It should have been gated by specific platform, with
+# Windows using `cl` and everyone else using `clang`
+
 
 # The compiler is chosen by the platform's toolchain class, not hardcoded.
 # Container platforms get the clang/lld the Dockerfile pins (naming a compiler
