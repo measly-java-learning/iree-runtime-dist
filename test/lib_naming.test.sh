@@ -11,18 +11,31 @@ assert_eq "$(asset_stem 3.11.0 default linux-aarch64)"   "iree-runtime-3.11.0-de
 assert_eq "$(tarball_name 3.11.0 default linux-aarch64)" "iree-runtime-3.11.0-default-linux-aarch64.tar.gz"    "tarball_name"
 assert_eq "$(sha_name 3.11.0 default linux-aarch64)"     "iree-runtime-3.11.0-default-linux-aarch64.tar.gz.sha256" "sha_name"
 
-# Build-image identity is keyed off the same platform token as the assets, so the
-# image tag, its Dockerfile, and the artifact platform can never drift apart.
-assert_eq "$(build_image_tag linux-x86_64)"  "iree-runtime-dist-build:linux-x86_64" "build_image_tag"
-assert_eq "$(build_dockerfile linux-x86_64)" "docker/linux-x86_64.Dockerfile"       "build_dockerfile"
+assert_eq "$(asset_stem 3.11.0 default windows-x86_64)"   "iree-runtime-3.11.0-default-windows-x86_64"        "asset_stem windows"
+assert_eq "$(tarball_name 3.11.0 default windows-x86_64)" "iree-runtime-3.11.0-default-windows-x86_64.tar.gz" "tarball_name windows stays .tar.gz"
 
-assert_eq "$(build_image_tag linux-aarch64)"  "iree-runtime-dist-build:linux-aarch64" "build_image_tag"
-assert_eq "$(build_dockerfile linux-aarch64)" "docker/linux-aarch64.Dockerfile"       "build_dockerfile"
+# The full-list functions must stay unchanged -- release.yml still needs the
+# complete platform list, since windows-x86_64 IS a release platform even
+# though it is not a build-image platform.
+assert_eq "$(known_platforms | tr '\n' ' ' | sed 's/ $//')" "linux-x86_64 linux-aarch64 windows-x86_64" \
+  "known_platforms still lists all platforms including windows-x86_64"
 
-# The Dockerfile every known platform names must actually exist on disk -- otherwise
-# a future platform added to PLATFORMS would fail only at CI image-build time.
-for p in $(known_platforms); do
-  df="$(cd "$here/.." && pwd)/$(build_dockerfile "$p")"
-  assert_eq "$([ -f "$df" ] && echo yes || echo NO)" "yes" "dockerfile exists for $p"
-done
+# parse_asset -- the inverse of asset_stem, shared by gen-pin.sh and the
+# release-notes renderer. Accepts tarball and sha basenames.
+assert_eq "$(parse_asset iree-runtime-3.11.0-default-linux-x86_64.tar.gz)"        "3.11.0 default linux-x86_64"   "parse_asset tarball"
+assert_eq "$(parse_asset iree-runtime-3.11.0-default-linux-x86_64.tar.gz.sha256)"  "3.11.0 default linux-x86_64"   "parse_asset sha"
+assert_eq "$(parse_asset iree-runtime-3.11.0-tsan-linux-aarch64.tar.gz)"           "3.11.0 tsan linux-aarch64"     "parse_asset tsan"
+assert_eq "$(parse_asset iree-runtime-3.11.0-default-windows-x86_64.tar.gz)"       "3.11.0 default windows-x86_64" "parse_asset windows"
+
+if parse_asset iree-runtime-3.11.0-10-default-linux-x86_64.tar.gz >/dev/null 2>&1; then
+  printf 'FAIL: parse_asset should reject a pkgrev-in-name (variant token with a dash)\n' >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+else
+  printf 'ok: parse_asset rejects a dash in the variant token\n'
+fi
+if parse_asset bogus.tar.gz >/dev/null 2>&1; then
+  printf 'FAIL: parse_asset should reject a non-round-tripping name\n' >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
+else
+  printf 'ok: parse_asset rejects a non-round-tripping name\n'
+fi
+
 exit "$ASSERT_FAILS"

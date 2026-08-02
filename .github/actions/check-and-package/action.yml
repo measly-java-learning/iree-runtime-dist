@@ -1,0 +1,42 @@
+name: Check and package
+description: Structural checks against a built prefix, then tarball it
+
+# Shared by release.yml's `build` (container Linux) and `build-windows` (native
+# MSVC) jobs, which ran these two steps verbatim. That is the duplication that
+# actually bites: a check added to the Linux copy silently skips Windows.
+#
+# `attest` and `upload-artifact` are deliberately NOT here. Their position
+# differs by platform and the difference is load-bearing: on Linux the consumer
+# e2e runs in-job between Package and attest, so only an artifact proven
+# consumable gets attested. On Windows the e2e is a separate job (the job
+# boundary is the isolation), so attest follows Package directly. Folding them
+# in would silently attest the Linux artifact before it was ever consumed.
+#
+# Both callers check this repo out to `path: dist`, so the paths below are
+# `dist/`-prefixed. Composite steps ignore the CALLER's `working-directory`, so
+# each run step sets its own. test/workflow_paths.test.sh enforces the prefix.
+inputs:
+  variant:
+    description: Build variant (default, tsan, ...)
+    required: true
+  platform:
+    description: Platform token (linux-x86_64, windows-x86_64, ...)
+    required: true
+  version:
+    description: IREE version, no `v` prefix (e.g. 3.11.0)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Structural checks
+      shell: bash
+      working-directory: dist
+      run: bash test/structural.sh out
+
+    - name: Package
+      shell: bash
+      working-directory: dist
+      run: |
+        bash scripts/package.sh out \
+          "${{ inputs.version }}" "${{ inputs.variant }}" "${{ inputs.platform }}" assets

@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
 # Single entrypoint for the IREE runtime dist build recipe.
-#
-# Must run inside quay.io/pypa/manylinux_2_28_x86_64. Never clones IREE --
 # the caller always supplies --iree-src (CI via actions/checkout, locally a mount).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/scripts/lib/variants.sh"
-. "$HERE/scripts/lib/cmakeflags.sh"
 . "$HERE/scripts/lib/naming.sh"
 
 VARIANT="default"
@@ -15,12 +12,11 @@ PREFIX=""
 IREE_SRC=""
 BUILD_DIR=""
 PLATFORM=""
-PRINT_FLAGS=0
 
 usage() {
   cat <<'EOF'
-usage: build-runtime.sh --variant <default> --prefix <dir> --iree-src <checkout> [--build-dir <dir>]
-       build-runtime.sh --print-flags [--variant <default>]
+usage: build-runtime.sh --variant <variant> --prefix <dir> --iree-src <checkout>
+                       [--build-dir <dir>] [--platform <token>]
 
   --variant      runtime variant (default: default)
   --prefix       install prefix for the staged tree
@@ -29,7 +25,6 @@ usage: build-runtime.sh --variant <default> --prefix <dir> --iree-src <checkout>
   --platform     target platform token (default: host arch); one of naming.sh's
                  known_platforms. Feeds manifest.json/BUILDINFO provenance and
                  platform-specific source patches.
-  --print-flags  print the effective cmake flags and exit; needs no source tree
 
 Env:
   HOST_UID, HOST_GID   if set, chown BUILD_DIR and PREFIX back to this
@@ -43,6 +38,28 @@ require_value() { # <flag>
   [ $# -ge 2 ] || { echo "error: $1 requires a value" >&2; exit 2; }
 }
 
+# Two places below repair upstream packaging gaps that exist only in the
+# clang/Linux build: the libbacktrace_impl target build and the libbacktrace
+# install repair. (The printf install repair is NOT Linux-only -- the Runtime
+# export set carries printf_printf on Windows too -- so it is deliberately not
+# inside these guards; see its comment at the install site.) Both libbacktrace
+# guards were guarded on naming.sh's platform_toolchain(), which commit 4bb545b
+# deleted along with the rest of the CI-topology helpers -- so both guards were
+# left calling a function that no longer exists. One predicate, local to this
+# script, rather than two open-coded platform comparisons: these guards must
+# agree, because building libbacktrace_impl without installing it (or vice
+# versa) fails much later and much less clearly than either failing here.
+#
+# This is deliberately NOT a revived platform_toolchain(). That classified a
+# platform's CI topology -- container vs runner -- which is a property of how the
+# build is scheduled, not of what the compiler needs repaired. The two happened
+# to coincide while Linux was the only container. What actually gates these
+# blocks is MSVC: it emits no libbacktrace archive, references zero backtrace_*
+# symbols, and omits libbacktrace from iree_base_base's INTERFACE_LINK_LIBRARIES.
+platform_is_msvc() { # <platform>
+  case "$1" in windows-*) return 0 ;; *) return 1 ;; esac
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --variant)     require_value "$@"; VARIANT="$2"; shift 2 ;;
@@ -50,41 +67,19 @@ while [ $# -gt 0 ]; do
     --iree-src)    require_value "$@"; IREE_SRC="$2"; shift 2 ;;
     --build-dir)   require_value "$@"; BUILD_DIR="$2"; shift 2 ;;
     --platform)    require_value "$@"; PLATFORM="$2"; shift 2 ;;
-    --print-flags) PRINT_FLAGS=1; shift ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-# -ffile-prefix-map keeps __FILE__ (which IREE embeds in status strings) and DWARF
-# DW_AT_comp_dir relative, so published artifacts carry no build-machine paths.
-PREFIX_MAP="-ffile-prefix-map=${IREE_SRC}=iree"
-# variant_cflags is the injection point for non-cache-var compiler flags (e.g.
-# tsan's -fsanitize=thread -g). Compose once so the build, --print-flags, and any
-# provenance use the identical string.
-VARIANT_CFLAGS="$(variant_cflags "$VARIANT")"
-COMPILER_FLAGS="$PREFIX_MAP${VARIANT_CFLAGS:+ $VARIANT_CFLAGS}"
-
-if [ "$PRINT_FLAGS" -eq 1 ]; then
-  effective_cmake_flags "$VARIANT"
-  echo "compiler_flags: $COMPILER_FLAGS"
-  exit 0
-fi
-
-[ -n "$PREFIX" ]   || { echo "error: --prefix is required" >&2; exit 2; }
-[ -n "$IREE_SRC" ] || { echo "error: --iree-src is required (this recipe never clones IREE)" >&2; exit 2; }
-[ -d "$IREE_SRC" ] || { echo "error: --iree-src '$IREE_SRC' is not a directory" >&2; exit 2; }
-
-if [ -z "$BUILD_DIR" ]; then
-  BUILD_DIR="$(dirname "$PREFIX")/iree-build-${VARIANT}"
-fi
-
 # Resolve the target platform token. It feeds manifest.json/BUILDINFO provenance
-# (via gen-manifest.sh and the @PLATFORM@ substitutions below) and the aarch64
-# source patch in Phase 1 -- so it MUST reflect the arch actually being built, not
-# a fixed list index. Default to the host arch so a bare local run is correct; CI
-# passes --platform explicitly from the build matrix. The value must be one of
-# naming.sh's known_platforms, the single source of truth for platform tokens.
+# (via gen-manifest.sh and the @PLATFORM@ substitutions below), the aarch64
+# source patch in Phase 1, and (below) which compiler-flag/repair branch runs --
+# so it MUST reflect the arch actually being built, not a fixed list index.
+# Default to the host arch so a bare local run is correct; CI passes --platform
+# explicitly from the build matrix. The value must be one of naming.sh's
+# known_platforms, the single source of truth for platform tokens.
+#
 if [ -z "$PLATFORM" ]; then
   case "$(uname -m)" in
     x86_64)        PLATFORM="linux-x86_64" ;;
@@ -94,6 +89,38 @@ if [ -z "$PLATFORM" ]; then
 fi
 known_platforms | grep -qx "$PLATFORM" \
   || { echo "error: unknown --platform '$PLATFORM' (known: $(known_platforms | paste -sd' ' -))" >&2; exit 2; }
+
+[ -n "$PREFIX" ]   || { echo "error: --prefix is required" >&2; exit 2; }
+[ -n "$IREE_SRC" ] || { echo "error: --iree-src is required (this recipe never clones IREE)" >&2; exit 2; }
+[ -d "$IREE_SRC" ] || { echo "error: --iree-src '$IREE_SRC' is not a directory" >&2; exit 2; }
+
+# The configuration itself lives in cmake/*.cmake and is read by CMake via -C.
+# What shell still owns is the two PATH-DEPENDENT values those files interpolate
+# through $ENV{}: the source root, in each toolchain's native spelling. Composed
+# here, once, where the path is actually known.
+export IREE_SRC
+
+# cl.exe bakes __FILE__ in as a Windows path, but this recipe runs under
+# Git-Bash on the Windows runner, so $IREE_SRC arrives POSIX-style
+# (/c/Users/...). /d1trimfile: trims a LITERAL prefix match against what cl
+# emits, so a POSIX-flavoured prefix matches nothing and silently leaves every
+# absolute __FILE__ in the shipped archives. cygpath -w is mandatory, not
+# best-effort: a missing cygpath is a hard error rather than a fallback to the
+# raw value, because the fallback produced a silently prefix-less flag. (The
+# fallback existed only for --print-flags on a non-Windows host, and
+# --print-flags is gone.)
+case "$PLATFORM" in
+  windows-*)
+    command -v cygpath >/dev/null 2>&1 \
+      || { echo "error: cygpath is not on PATH -- a windows build must run under Git-Bash" >&2; exit 1; }
+    IREE_SRC_NATIVE="$(cygpath -w "$IREE_SRC")"
+    export IREE_SRC_NATIVE
+    ;;
+esac
+
+if [ -z "$BUILD_DIR" ]; then
+  BUILD_DIR="$(dirname "$PREFIX")/iree-build-${VARIANT}"
+fi
 
 # The IREE source is a bind mount owned by the invoking user, while the container
 # runs as root, so git refuses it as "dubious ownership" and every `git -C
@@ -116,7 +143,7 @@ IREE_VERSION="$(git -C "$IREE_SRC" describe --tags --abbrev=0 | sed 's/^v//')" |
   echo "error: could not read a tag from '$IREE_SRC' -- is it a git checkout at a tagged commit?" >&2
   exit 1
 }
-COMPILER_VERSION="${COMPILER_VERSION:-$IREE_VERSION}"
+IREE_COMPILER_VERSION="${IREE_COMPILER_VERSION:-$IREE_VERSION}"
 
 echo "build-runtime.sh: variant=$VARIANT prefix=$PREFIX build-dir=$BUILD_DIR"
 
@@ -183,15 +210,19 @@ done
 # exactly 64 bytes, so 128 fails it (64 >= 128). Under tsan the same struct bloats
 # past 128 (the pthread_mutex_t fallback again) so it holds. So default aarch64
 # must stay at 64 (its known-good value, which builds clean) and only tsan gets
-# 128. Gate on the thread sanitizer via variant_sanitizer so a future
-# thread-sanitized variant inherits this without another edit here.
+# 128. Gated on the variant NAME, not on variant_sanitizer, which this task
+# deleted: the sanitizer value is now observed from the build's own
+# CMAKE_C_FLAGS, which is not available this early and would be circular anyway.
+# A future thread-sanitized variant needs this condition widened by hand -- the
+# patch is mutually exclusive across variants, so there was never a safe way to
+# infer it.
 #
 # Idempotent (a re-run's sed matches nothing, the post-condition grep still
 # holds) and fail-loud (if upstream ever reformats the #define, the grep aborts
 # rather than silently shipping the unpatched 64). NOTE: mutates the caller's
 # --iree-src tree in place -- CI clones fresh each run; a local host does not, so
 # a local aarch64 checkout stays patched after the build.
-if [ "$PLATFORM" = linux-aarch64 ] && [ "$(variant_sanitizer "$VARIANT")" = thread ]; then
+if [ "$PLATFORM" = linux-aarch64 ] && [ "${VARIANT}" = tsan ]; then
   _atomics_h="$IREE_SRC/runtime/src/iree/base/internal/atomics.h"
   for _c in destructive constructive; do
     sed -i "s/^#define iree_hardware_${_c}_interference_size 64\$/#define iree_hardware_${_c}_interference_size 128/" \
@@ -202,17 +233,19 @@ if [ "$PLATFORM" = linux-aarch64 ] && [ "$(variant_sanitizer "$VARIANT")" = thre
   echo "==> patched aarch64 interference-size constants to 128"
 fi
 
-mapfile -t FLAGS < <(effective_cmake_flags "$VARIANT")
-
 echo "==> configuring"
+# Three cache-init files, composed left to right: universal, platform, variant.
+# ORDER IS LOAD-BEARING -- cmake/variant-tsan.cmake appends to the CMAKE_C_FLAGS
+# that the platform file sets, and can only read a value already in the cache.
+#
+# CMAKE_INSTALL_PREFIX is the only remaining -D: the only value that genuinely
+# varies per invocation. Everything else is declared in the files above, where
+# gen-manifest.sh can read back what the build actually used.
 cmake -G Ninja -B "$BUILD_DIR" -S "$IREE_SRC" \
-  "${FLAGS[@]}" \
-  -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-  -DCMAKE_INSTALL_LIBDIR=lib \
-  -DCMAKE_C_COMPILER=clang \
-  -DCMAKE_CXX_COMPILER=clang++ \
-  -DCMAKE_C_FLAGS="$COMPILER_FLAGS" \
-  -DCMAKE_CXX_FLAGS="$COMPILER_FLAGS"
+  -C "$HERE/cmake/common.cmake" \
+  -C "$HERE/cmake/$PLATFORM.cmake" \
+  -C "$HERE/cmake/variant-$VARIANT.cmake" \
+  -DCMAKE_INSTALL_PREFIX="$PREFIX"
 
 echo "==> building"
 cmake --build "$BUILD_DIR"
@@ -229,9 +262,13 @@ cmake --build "$BUILD_DIR"
 # This must be an explicit --target build, and it must run BEFORE the install
 # phase copies the archive into the prefix (see the libbacktrace repair below).
 # The archive is only produced on Linux with IREE_ENABLE_LIBBACKTRACE ON, which is
-# the default there and what effective_cmake_flags relies on; if that ever stops
+# the default there and what cmake/common.cmake relies on; if that ever stops
 # holding, the existence assert below is the thing that catches it, not this line.
-cmake --build "$BUILD_DIR" --target libbacktrace_impl
+# On Windows there is no libbacktrace_impl target to build at all (see the
+# platform_is_msvc guard around the repair below), so skip this too.
+if ! platform_is_msvc "$PLATFORM"; then
+  cmake --build "$BUILD_DIR" --target libbacktrace_impl
+fi
 
 echo "==> installing to $PREFIX"
 # The step the walking skeleton skipped. Running it is what makes the export set
@@ -268,10 +305,24 @@ done
 # EXCLUDE_FROM_ALL)`. CMake's documented behavior for an EXCLUDE_FROM_ALL subdirectory is
 # that its cmake_install.cmake is never chained into the parent directory's install script
 # -- so the component-scoped installs above never reach it, even though the export set's
-# IREETargets-Runtime-release.cmake references libprintf_printf.a via IMPORTED_LOCATION.
+# IREETargets-Runtime-release.cmake references the archive via IMPORTED_LOCATION
+# (libprintf_printf.a on Linux, printf_printf.lib on MSVC). This install must run on EVERY
+# platform, deliberately NOT inside the platform_is_msvc guard below: the Runtime export
+# set carries printf_printf on Windows too, and that guard swallowing this install shipped
+# a Windows prefix that fails find_package(IREE) with "imported target printf_printf
+# references ... printf_printf.lib but this file does not exist".
 # Install that one subdirectory's IREEBundledLibraries component explicitly, or the printf
 # archive silently never lands in $PREFIX/lib despite the export set claiming it exists.
 cmake --install "$BUILD_DIR/build_tools/third_party/printf" --component IREEBundledLibraries --prefix "$PREFIX"
+
+# libbacktrace is a Linux-only repair. On Windows IREE emits no install rule for
+# it, ships no libbacktrace*.lib, references zero backtrace_* symbols across all
+# 191 archives, and omits it from iree_base_base's INTERFACE_LINK_LIBRARIES. It
+# is dropped outright -- NOT substituted by dbghelp, which appears nowhere in the
+# export set (spike W4). Guarded on platform, deliberately NOT on "does the
+# archive exist": an existence check would silently no-op if the Linux archive
+# ever went missing, turning a loud failure into a quiet one.
+if ! platform_is_msvc "$PLATFORM"; then
 
 # build_tools/third_party/libbacktrace has the same EXCLUDE_FROM_ALL shape as printf
 # above, but worse: its CMakeLists.txt has NO install(TARGETS ...) rule at all for the
@@ -359,6 +410,8 @@ list(APPEND _cmake_import_check_files_for_libbacktrace_libbacktrace "${_IMPORT_P
 EOF
 fi
 
+fi # ! platform_is_msvc "$PLATFORM" (libbacktrace repair)
+
 # Remove compiler target files that were installed by the IREECMakeExports component.
 # The IREE compiler is explicitly out of contract for this project (-DIREE_BUILD_COMPILER=OFF),
 # so compiler-only target files must not ship. Specifically:
@@ -413,7 +466,12 @@ echo "==> phase 1 complete"
 # surface. Let the assertion exempt build paths that live ONLY in debug
 # sections of objects/archives; a leak in any link-relevant content (a .cmake
 # config, a string table, an INTERFACE flag) still fails. Empty for default.
-if [ -n "$(variant_sanitizer "$VARIANT")" ]; then
+#
+# Gated on the variant name directly now that variant_sanitizer is gone. Same
+# reasoning as the TSAN.md gate in Phase 3: the sanitizer VALUE recorded in
+# provenance is observed from the build's own CMAKE_C_FLAGS, but "does this
+# variant build with -g" is a property of the variant, not of the build.
+if [ "$VARIANT" = "tsan" ]; then
   export RELOC_ALLOW_DEBUG_PATHS=1
 fi
 
@@ -431,10 +489,10 @@ bash "$HERE/scripts/gen-constants.sh" "$PREFIX"
 
 echo "==> generating manifest"
 bash "$HERE/scripts/gen-manifest.sh" "$PREFIX" "$VARIANT" "$PLATFORM" \
-  "$IREE_SRC" "$IREE_VERSION" "$COMPILER_VERSION"
+  "$IREE_SRC" "$IREE_VERSION" "$IREE_COMPILER_VERSION" "$BUILD_DIR"
 
 echo "==> collecting license notices"
-bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC" "$BUILD_DIR"
+bash "$HERE/scripts/gen-notices.sh" "$PREFIX" "$IREE_SRC" "$BUILD_DIR" "$PLATFORM"
 
 # Ship an in-artifact README documenting the share/ layout + JSON schema, so a
 # non-CMake consumer (Gradle/Python/Rust) has the path convention and file shapes
@@ -447,17 +505,25 @@ sed -e "s|@IREE_VERSION@|${IREE_VERSION}|g" \
     > "$PREFIX/share/iree-runtime-dist/README.md"
 
 # Sanitizer variants ship a consumer runbook (build with clang, ASLR note,
-# suppressions wiring). A default prefix ships none.
-if [ -n "$(variant_sanitizer "$VARIANT")" ]; then
+# suppressions wiring). A default prefix ships none. Gated on the variant name
+# directly now that variant_sanitizer is gone -- the sanitizer VALUE recorded in
+# provenance is observed from the build's own CMAKE_C_FLAGS, but "does this
+# variant ship TSAN.md" is a property of the variant, not of the build.
+if [ "$VARIANT" = tsan ]; then
   echo "==> shipping sanitizer runbook"
-  bash "$HERE/scripts/gen-tsan-docs.sh" "$PREFIX" "$IREE_VERSION" "$COMPILER_VERSION"
+  bash "$HERE/scripts/gen-tsan-docs.sh" "$PREFIX" "$IREE_VERSION" "$IREE_COMPILER_VERSION"
 fi
 
 echo "==> installing dist cmake additions"
-RUNTIME_COMMIT="$(git -C "$IREE_SRC" rev-parse HEAD)"
+# Read back from the manifest generated 20-odd lines above rather than running
+# git rev-parse a second time. Same duplication class as the iree_tag
+# reconstruction: two paths to one fact can disagree silently. This makes the
+# template substitution and the manifest provably agree.
+RUNTIME_COMMIT="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runtime_commit"])' \
+  "$PREFIX/share/iree-runtime-dist/manifest.json")"
 mkdir -p "$PREFIX/lib/cmake/IreeRuntimeDist"
 sed -e "s|@IREE_VERSION@|${IREE_VERSION}|g" \
-    -e "s|@COMPILER_VERSION@|${COMPILER_VERSION}|g" \
+    -e "s|@COMPILER_VERSION@|${IREE_COMPILER_VERSION}|g" \
     -e "s|@VARIANT@|${VARIANT}|g" \
     -e "s|@PLATFORM@|${PLATFORM}|g" \
     -e "s|@RUNTIME_COMMIT@|${RUNTIME_COMMIT}|g" \
@@ -482,7 +548,7 @@ echo "==> phase 3 complete"
 
 # --- Phase 4: pair with the compiler ----------------------------------------
 echo "==> compiling paired smoke artifact"
-bash "$HERE/scripts/gen-addvmfb.sh" "$PREFIX" "$COMPILER_VERSION"
+bash "$HERE/scripts/gen-addvmfb.sh" "$PREFIX" "$IREE_COMPILER_VERSION"
 
 # --- Final relocatability proof ----------------------------------------------
 # The Phase 2 assertion above only covers what existed at that point in the

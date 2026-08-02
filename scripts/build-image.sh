@@ -11,10 +11,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 . "$HERE/lib/naming.sh"
 
-# Build every known platform's image (currently just linux-x86_64). Tag and
-# Dockerfile are derived from naming.sh, so this needs no edit when a platform
-# is added -- only a new docker/<platform>.Dockerfile. An arg selects one.
-platforms="${1:-$(known_platforms)}"
+# Build every CONTAINER platform's image. Tag and Dockerfile are derived from
+# naming.sh, so this needs no edit when a container platform is added -- only
+# a new docker/<platform>.Dockerfile. Not every known platform is containerised
+# (Windows gets its toolchain from a pinned runner image instead), so this
+# must iterate container_platforms, not known_platforms. An arg selects one.
+platforms="${1:-$(container_platforms)}"
 
 for platform in $platforms; do
   image_tag="$(build_image_tag "$platform")"

@@ -24,7 +24,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${1:?usage: gen-addvmfb.sh <prefix> <compiler-version>}"
-COMPILER_VERSION="${2:?compiler-version required}"
+IREE_COMPILER_VERSION="${2:?compiler-version required}"
 
 OUT_DIR="$PREFIX/share/iree-runtime-dist"
 mkdir -p "$OUT_DIR"
@@ -35,8 +35,30 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 venv="$(mktemp -d)/venv"
 trap 'rm -rf "$(dirname "$venv")"' EXIT
 
-python3 -m venv "$venv"
-"$venv/bin/pip" install --quiet "iree-base-compiler==${COMPILER_VERSION}"
+# `python3` is not a universal spelling: it is the only one on the manylinux
+# build image, but Git-Bash on a Windows runner sees the CPython install's
+# `python.exe` and may have no `python3` at all. Resolve explicitly and fail
+# loudly if neither exists -- an unresolved interpreter must not become a
+# skipped add.vmfb, because Phase 4 producing nothing is precisely how an
+# unpaired tarball would ship.
+PYTHON=""
+for _py in python3 python; do
+  if command -v "$_py" >/dev/null 2>&1; then PYTHON="$_py"; break; fi
+done
+[ -n "$PYTHON" ] || { echo "error: no python3/python on PATH -- cannot install the paired compiler" >&2; exit 1; }
+
+"$PYTHON" -m venv "$venv"
+
+# venv's script directory is `bin/` on POSIX and `Scripts/` on Windows. Probe
+# for the one that exists rather than assuming, and fail loudly if neither
+# does; a missing directory here would otherwise surface as a confusing
+# "command not found" three lines later.
+if   [ -d "$venv/bin" ];     then VENV_BIN="$venv/bin"
+elif [ -d "$venv/Scripts" ]; then VENV_BIN="$venv/Scripts"
+else echo "error: venv at '$venv' has neither bin/ nor Scripts/" >&2; exit 1
+fi
+
+"$VENV_BIN/pip" install --quiet "iree-base-compiler==${IREE_COMPILER_VERSION}"
 
 # iree-compile embeds its INPUT path (as MLIR location info) into the compiled
 # module -- an absolute input path therefore leaks the build machine's
@@ -45,11 +67,11 @@ python3 -m venv "$venv"
 # path (-o) is not embedded, so it can stay absolute.
 (
   cd "$HERE/../emit"
-  "$venv/bin/iree-compile" "add.mlir" \
+  "$VENV_BIN/iree-compile" "add.mlir" \
     --iree-hal-target-device=local \
     --iree-hal-local-target-device-backends=llvm-cpu \
     --iree-llvmcpu-target-cpu=generic \
     -o "$OUT_DIR/add.vmfb"
 )
 
-echo "==> compiled add.vmfb with iree-base-compiler==${COMPILER_VERSION}"
+echo "==> compiled add.vmfb with iree-base-compiler==${IREE_COMPILER_VERSION}"

@@ -5,6 +5,44 @@ here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/assert.sh"
 prefix="${1:?usage: build_smoke.sh <prefix>}"
 
+# Archive naming and the symbol tool differ by platform. Measured: every file in
+# a Windows prefix's lib/ ends in .lib with no `lib` prefix (plain MSVC
+# defaults), and llvm-nm reads COFF with output structurally identical to GNU nm.
+if ls "$prefix"/lib/*.lib >/dev/null 2>&1; then
+  AR_EXT="lib"; AR_PRE=""
+  # Debian/Ubuntu (and most distro packaging of LLVM) ship llvm-nm under a
+  # versioned name -- bare `llvm-nm` is frequently absent even when LLVM is
+  # installed (see scripts/relocatability.sh's coff_strip_tool resolution for
+  # the same problem with llvm-objcopy). Honour an explicit override first,
+  # then fall back through plausible versioned names. NM stays unresolved if
+  # nothing matches, so the existing `command -v "$NM"` guard below fails
+  # loudly instead of silently skipping the symbol checks.
+  if [ -n "${NM:-}" ] && command -v "${NM}" >/dev/null 2>&1; then
+    :
+  else
+    NM=""
+    for _nm_cand in llvm-nm llvm-nm-18 llvm-nm-17; do
+      if command -v "$_nm_cand" >/dev/null 2>&1; then
+        NM="$_nm_cand"
+        break
+      fi
+    done
+    NM="${NM:-llvm-nm}"
+  fi
+else
+  AR_EXT="a";   AR_PRE="lib"; NM="${NM:-nm}"
+fi
+
+# Guard against the highest-risk silent-failure defect: if detection picked
+# the wrong branch, the archive glob below matches nothing, every loop over
+# "$prefix"/lib/*."$AR_EXT" runs zero iterations, and the script could report
+# success having checked nothing. Fail loudly before that can happen.
+if ! ls "$prefix"/lib/*."$AR_EXT" >/dev/null 2>&1; then
+  echo "FAIL: no lib/*.$AR_EXT archives found in $prefix -- archive-convention detection picked the wrong branch or the prefix is empty" >&2
+  ASSERT_FAILS=$((ASSERT_FAILS+1))
+  exit "$ASSERT_FAILS"
+fi
+
 for f in \
   "lib/cmake/IREE/IREERuntimeConfig.cmake" \
   "lib/cmake/IREE/IREETargets-Runtime.cmake" \
@@ -35,7 +73,7 @@ do
 done
 
 # Static archives only.
-if ls "$prefix"/lib/*.a >/dev/null 2>&1; then echo "ok: static archives present"
+if ls "$prefix"/lib/*."$AR_EXT" >/dev/null 2>&1; then echo "ok: static archives present"
 else echo "FAIL: no static archives in lib/" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 
 # The unified runtime archive specifically -- this is the target a downstream
@@ -43,13 +81,13 @@ else echo "FAIL: no static archives in lib/" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1
 # build-runtime.sh comments), so a bare `cmake --install` produces a complete
 # looking export set that points at archives which were never actually copied.
 # Check the archive a downstream consumer actually links exists and is non-empty.
-unified="$prefix/lib/libiree_runtime_unified.a"
-if [ -s "$unified" ]; then echo "ok: libiree_runtime_unified.a present and non-empty"
+unified="$prefix/lib/${AR_PRE}iree_runtime_unified.$AR_EXT"
+if [ -s "$unified" ]; then echo "ok: $(basename "$unified") present and non-empty"
 else echo "FAIL: $unified missing or empty" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 
 # flatcc is a bundled transitive dependency (IREEBundledLibraries component);
 # it must be installed too or the link surface is incomplete.
-for f in libflatcc_runtime.a libflatcc_parsing.a; do
+for f in ${AR_PRE}flatcc_runtime.$AR_EXT ${AR_PRE}flatcc_parsing.$AR_EXT; do
   if [ -s "$prefix/lib/$f" ]; then echo "ok: $f present and non-empty"
   else echo "FAIL: $prefix/lib/$f missing or empty" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 done
@@ -92,16 +130,29 @@ fi
 # they say nothing about whether .text is position-independent. The sanitizer
 # variant builds with -g, so a naive scan of all relocations false-positives on
 # its debug info; only relocations in non-.debug sections indicate non-PIC code.
-bad=0
-for a in "$prefix"/lib/*.a; do
-  if readelf -r "$a" 2>/dev/null | awk '
-      /^Relocation section/ { indbg = ($0 ~ /\.debug/) }
-      !indbg && /R_X86_64_(32|32S)[[:space:]]/ { found=1 }
-      END { exit(found ? 0 : 1) }'; then
-    echo "FAIL: non-PIC relocations in code section of $(basename "$a")" >&2; bad=1
-  fi
-done
-if [ "$bad" -eq 0 ]; then echo "ok: archives are PIC (code sections; DWARF debug relocs ignored)"; else ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+#
+# ELF-only: readelf cannot parse COFF (.lib) archives at all, and PIC/PIE is
+# not a meaningful concept for MSVC-produced code in the first place (CLAUDE.md
+# records that -DCMAKE_POSITION_INDEPENDENT_CODE=ON is a harmless no-op on
+# MSVC) -- so on the COFF path there is genuinely nothing to check, not merely
+# something unverifiable. Gate the whole block on AR_EXT and skip explicitly
+# rather than either faking a pass (readelf silently no-op'ing on every
+# archive, "bad" staying 0, printing a false "ok:") or failing a check that
+# doesn't apply to the platform.
+if [ "$AR_EXT" = "a" ]; then
+  bad=0
+  for a in "$prefix"/lib/*."$AR_EXT"; do
+    if readelf -r "$a" 2>/dev/null | awk '
+        /^Relocation section/ { indbg = ($0 ~ /\.debug/) }
+        !indbg && /R_X86_64_(32|32S)[[:space:]]/ { found=1 }
+        END { exit(found ? 0 : 1) }'; then
+      echo "FAIL: non-PIC relocations in code section of $(basename "$a")" >&2; bad=1
+    fi
+  done
+  if [ "$bad" -eq 0 ]; then echo "ok: archives are PIC (code sections; DWARF debug relocs ignored)"; else ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
+else
+  echo "skip: PIC check is ELF-only; PIC/PIE has no meaning for COFF archives (MSVC)"
+fi
 
 # Header closure: every header #include "iree/..."-ed directly by the three public
 # entry points a consumer #includes must actually exist under include/. This is the
@@ -206,7 +257,19 @@ if [ -e "$targets_runtime" ]; then
       *'$<'*) continue ;;   # unresolved (possibly nested) generator-expression artifact
       *','*)  continue ;;   # $<TARGET_PROPERTY:tgt,PROP>-style artifact left after unwrap
                              # (a real target/library name never contains a comma)
-      -l*)    continue ;;   # already-normalized bare linker flag
+      -*)     continue ;;   # a raw linker flag, not a target reference.
+                             # Was `-l*` (GNU form, from relocatability
+                             # repair's absolute-system-path normalization);
+                             # MSVC puts its own flags in this list too --
+                             # observed: `-pdbpagesize:32768`, which shares the
+                             # property list with the -natvis: entries Task 9
+                             # repairs. Broadening to any leading dash is safe
+                             # for what this check is for: no CMake target and
+                             # no library name can begin with `-`, so a leading
+                             # dash unambiguously means "pass this through to
+                             # the linker", and the linker validates it. The
+                             # defect class here is a BARE NAME the linker will
+                             # try and fail to resolve as a library.
     esac
     if grep -qF "add_library($tok " "$targets_runtime"; then
       continue
@@ -219,7 +282,19 @@ if [ -e "$targets_runtime" ]; then
         fi
         ;;
       dl|rt|m|pthread)
-        continue
+        # POSIX system libraries: resolved by the linker's default search
+        # path, so a bare name is correct and needs no imported target.
+        if [ "$AR_EXT" = "a" ]; then continue; fi
+        ;;
+      shlwapi)
+        # The Windows SDK equivalent. IREE links shlwapi for its Win32 path
+        # helpers; MSVC resolves the bare name against the SDK's LIB paths, so
+        # like dl/rt/m/pthread it is correct as a bare name and needs no
+        # imported target. Gated on the COFF branch (and the POSIX names on
+        # the ELF branch) so neither platform's allowlist can silently excuse
+        # a dangling reference on the other, where that name resolves to
+        # nothing.
+        if [ "$AR_EXT" = "lib" ]; then continue; fi
         ;;
     esac
     dangling="$dangling $tok"
@@ -262,8 +337,8 @@ else echo "FAIL: add.vmfb missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 #   assertion, that claim rested only on the build flag and on which
 #   components were installed; this makes it evidence, re-checked on every
 #   build.
-if command -v nm >/dev/null 2>&1; then
-  unified="$prefix/lib/libiree_runtime_unified.a"
+if command -v "$NM" >/dev/null 2>&1; then
+  unified="$prefix/lib/${AR_PRE}iree_runtime_unified.$AR_EXT"
 
   # EXPECTED PRESENT. At minimum: instance/session lifecycle, the buffer-view
   # allocation entry point, and iree_hal_device_allocator -- the allocator
@@ -280,11 +355,11 @@ if command -v nm >/dev/null 2>&1; then
       iree_hal_buffer_view_allocate_buffer_copy \
       iree_hal_device_allocator
     do
-      defined_kind="$(nm "$unified" 2>/dev/null | awk -v s="$sym" '$3 == s && $2 ~ /^[TtDd]$/ {print $2; found=1} END{if(!found) print ""}' | head -1)"
+      defined_kind="$("$NM" "$unified" 2>/dev/null | awk -v s="$sym" '$3 == s && $2 ~ /^[TtDd]$/ {print $2; found=1} END{if(!found) print ""}' | head -1)"
       if [ -n "$defined_kind" ]; then
-        echo "ok: $sym is defined ($defined_kind) in libiree_runtime_unified.a"
+        echo "ok: $sym is defined ($defined_kind) in $(basename "$unified")"
       else
-        echo "FAIL: $sym is not defined in libiree_runtime_unified.a (only undefined, or entirely absent)" >&2
+        echo "FAIL: $sym is not defined in $(basename "$unified") (only undefined, or entirely absent)" >&2
         ASSERT_FAILS=$((ASSERT_FAILS+1))
       fi
     done
@@ -293,18 +368,18 @@ if command -v nm >/dev/null 2>&1; then
     ASSERT_FAILS=$((ASSERT_FAILS+1))
   fi
 
-  # EXPECTED ABSENT. Scan every shipped archive (all of lib/*.a, not just the
-  # unified one) -- with 198 archives this is empirically ~2s with nm, cheap
-  # enough that narrowing the scope buys nothing. Case-insensitive substring
-  # match on both raw (mangled) and c++filt-demangled symbol names: verified
-  # against the real shipped archives below that "llvm" and "mlir" do not
-  # appear as a substring of any other defined symbol name here (0 hits
+  # EXPECTED ABSENT. Scan every shipped archive (all of lib/*.$AR_EXT, not just
+  # the unified one) -- with 198 archives this is empirically ~2s with nm,
+  # cheap enough that narrowing the scope buys nothing. Case-insensitive
+  # substring match on both raw (mangled) and c++filt-demangled symbol names:
+  # verified against the real shipped archives below that "llvm" and "mlir" do
+  # not appear as a substring of any other defined symbol name here (0 hits
   # either way), so there is no known false-positive source in this archive
   # set to guard against with a narrower anchor -- a plain substring match is
   # the strongest, simplest check available and it is what actually ran.
   llvm_hits="$(
-    for a in "$prefix"/lib/*.a; do
-      nm "$a" 2>/dev/null
+    for a in "$prefix"/lib/*."$AR_EXT"; do
+      "$NM" "$a" 2>/dev/null
     done \
       | awk '$2 ~ /^[TtDd]$/ {print $3}' \
       | { command -v c++filt >/dev/null 2>&1 && c++filt || cat; } \
@@ -318,7 +393,7 @@ if command -v nm >/dev/null 2>&1; then
     ASSERT_FAILS=$((ASSERT_FAILS+1))
   fi
 else
-  echo "FAIL: nm not available, cannot run expected/unexpected symbol checks" >&2
+  echo "FAIL: $NM not available, cannot run expected/unexpected symbol checks" >&2
   ASSERT_FAILS=$((ASSERT_FAILS+1))
 fi
 

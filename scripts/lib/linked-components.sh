@@ -47,6 +47,20 @@
 #                 iree::runtime::unified never pulls in benchmark. Physically
 #                 present in out/lib (the export set installs everything), but not
 #                 linked into the shipped runtime target.
+#   musl        - REJECTED, and rejected for a third reason distinct from the two
+#                 below: it IS installed (libiree_builtins_musl_bin_libmusl.a) but
+#                 nothing references it. The archive defines 4 symbols --
+#                 iree_builtins_libmusl_create plus two embedded wasm bitcode blobs
+#                 as rodata (file_0/file_1) and a toc -- and they appear as
+#                 undefined symbols in zero other archives, including
+#                 libiree_runtime_unified.a; it is likewise absent from
+#                 iree_runtime_impl's INTERFACE_LINK_LIBRARIES closure. It is a
+#                 container for precompiled device-side builtins, not code linked
+#                 into a CPU runtime. Called out explicitly because musl IS one of
+#                 the 11 IREE_REQUIRED_SUBMODULES and IS physically present in
+#                 out/lib, so an auditor who finds the archive but no notice needs
+#                 to find the reason here. Verified identically on linux-x86_64 and
+#                 on Windows (see spike/windows-iree-runbook.md, W4).
 #   tracy, spirv_cross, vulkan_headers, webgpu-headers, hip-build-deps,
 #   hsa-runtime-headers, googletest, llvm-project - REJECTED. No archive, no
 #   symbol, in out/lib at all; confirmed absent by both `ls out/lib/*.a` and
@@ -55,6 +69,34 @@
 #
 # When the driver/loader set changes, re-run that inspection -- this list is not
 # derivable from the build flags alone.
-IREE_LINKED_COMPONENTS="flatcc printf libbacktrace"
+#
+#   WINDOWS (windows-x86_64) -- re-derived, not assumed. Same two-step method:
+#   transitive INTERFACE_LINK_LIBRARIES closure from iree_runtime_impl (72
+#   targets; iree_runtime_unified's own property is a genex delegating to it),
+#   then an nm cross-check with llvm-nm over all 191 installed .lib archives.
+#   flatcc      - ACCEPT. 10 flatcc_verify_* symbols defined in flatcc_parsing.lib
+#                 and referenced undefined from iree_vm_bytecode_module.lib and
+#                 iree_runtime_unified.lib. Same as Linux.
+#   printf      - ACCEPT. vfctprintf/vsnprintf_ referenced undefined from
+#                 iree_base_base.lib and iree_runtime_unified.lib. Same as Linux.
+#   libbacktrace - REJECTED on Windows, confirmed four ways: CMake emits no
+#                 install rule; no libbacktrace*.lib anywhere in the prefix; zero
+#                 backtrace_create_state/_full/_pcinfo/_simple/_syminfo symbols
+#                 across all 191 archives; and absent from iree_base_base's
+#                 INTERFACE_LINK_LIBRARIES, where the Linux build carries it.
+#                 It is NOT displaced by dbghelp -- that string appears zero times
+#                 in IREETargets-Runtime.cmake and iree_runtime_unified.lib
+#                 references no SymInitialize/SymFromAddr/StackWalk/
+#                 CaptureStackBackTrace symbol. The symbolization path is simply
+#                 not enabled in this configuration.
+#   See spike/windows-iree-runbook.md W4 for the full derivation.
+_IREE_LINKED_COMPONENTS_LINUX="flatcc printf libbacktrace"
+_IREE_LINKED_COMPONENTS_WINDOWS="flatcc printf"
 
-linked_components() { printf '%s' "$IREE_LINKED_COMPONENTS"; }
+linked_components() { # <platform>
+  case "${1:-}" in
+    linux-*)   printf '%s' "$_IREE_LINKED_COMPONENTS_LINUX" ;;
+    windows-*) printf '%s' "$_IREE_LINKED_COMPONENTS_WINDOWS" ;;
+    *) echo "error: unknown platform '${1:-}'" >&2; return 2 ;;
+  esac
+}

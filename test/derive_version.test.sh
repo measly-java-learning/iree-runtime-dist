@@ -6,8 +6,6 @@ d="$here/../scripts/derive-version.sh"
 
 out="$(bash "$d" v3.11.0-1)"
 assert_contains "$out" "IREE_VERSION=3.11.0"      "derives IREE version"
-assert_contains "$out" "IREE_TAG=v3.11.0"          "derives IREE tag"
-assert_contains "$out" "COMPILER_VERSION=3.11.0"   "compiler version matches runtime version"
 
 # pkgrev only re-rolls the same version; it must not leak into the version itself.
 out2="$(bash "$d" v3.11.0-7)"

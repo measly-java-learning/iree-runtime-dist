@@ -44,10 +44,44 @@ relocatability_repair() { # <prefix>
     # drop the whole property line (harmless no-op set_target_properties
     # argument otherwise, but this keeps output tidy and the repair
     # idempotent -- a second pass finds nothing left to strip).
+    # The absolute form is platform-dependent and BOTH must be matched. A
+    # POSIX leak is "-I/iree/third_party/flatcc/include/"; the Windows one is
+    # "-ID:/a/.../iree/third_party/flatcc/include/", which the POSIX-only
+    # pattern (-I followed by "/") silently does not match. Measured in the
+    # first real Windows artifact (run 30284606833): the flatcc -I entries
+    # survived into the shipped IREETargets-Runtime.cmake precisely because of
+    # this, so a consumer's compile line would carry a D:\ path from the CI
+    # runner. Only ABSOLUTE -I flags are stripped -- a relative one is not a
+    # build-machine path and is left alone.
     find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
-      | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS/s#-I/[^;"]*;?##g'
+      | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS/s#-I([A-Za-z]:)?[\\/][^;"]*;?##g'
     find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
       | xargs -0 -r sed -i -E '/INTERFACE_COMPILE_OPTIONS[[:space:]]*""[[:space:]]*$/d'
+
+    # Windows exports carry a "-natvis:<abs-src-path>" entry inside
+    # iree_runtime_impl's INTERFACE_LINK_LIBRARIES -- a Visual Studio
+    # debugger visualiser pointing at iree.natvis in the builder's source
+    # tree. It is never shipped in the prefix, so removal is the correct
+    # repair, not rewriting to a relative path: a .natvis a consumer doesn't
+    # have is equally useless whether the path is absolute or relative, and
+    # a relative path would still dangle on their link line. Drive-letter
+    # notation (X:) is what makes the path absolute on Windows; CMake
+    # normalizes the export file to forward slashes but match both slash
+    # styles defensively. Only entries whose path is absolute are matched --
+    # siblings (real targets, other linker flags) are left untouched, and
+    # the surrounding ';' is consumed with the entry so no doubled ';;' or
+    # empty list element is left behind. grep -q gates the sed so a second
+    # pass over an already-repaired file is a no-op (idempotent).
+    find "$prefix/lib/cmake" -type f -name '*.cmake' -print0 2>/dev/null \
+      | while IFS= read -r -d '' f; do
+          if grep -Eq -- '-natvis:[A-Za-z]:[/\\]' "$f"; then
+            sed -i -E \
+              -e 's/;-natvis:[A-Za-z]:[/\\][^;"]*//g' \
+              -e 's/-natvis:[A-Za-z]:[/\\][^;"]*;//g' \
+              -e 's/-natvis:[A-Za-z]:[/\\][^;"]*//g' \
+              "$f"
+          fi
+        done
   fi
 
   # Build-tree metadata must never ship.
@@ -62,10 +96,47 @@ relocatability_repair() { # <prefix>
 }
 
 # Fails loudly, listing every offender. Never narrow this to "just lib/cmake".
+#
+# KNOWN GAP, WINDOWS (measured, not theoretical -- see the Task 12c report):
+# build-runtime.sh passes container/runner-internal paths as needles, which on
+# a Windows runner are the POSIX forms Git-Bash uses (/d/a/...). Everything
+# cmake and cl.exe bake into the artifact is Windows-form (D:\... or D:/...),
+# so those needles match nothing and this assertion currently passes on
+# Windows without proving anything. Adding the Windows-form needles is the
+# right fix, but it does not stand alone: the first real Windows artifact
+# (run 30284606833) carried a build-dir path in 191 of 191 COFF archives,
+# because lib.exe canonicalises each member name to a full path even when
+# ninja hands it a relative one. That needs its own remedy (an archiver that
+# preserves relative member names, or a post-pass over the member-name string
+# table) before the assertion can be widened without failing every build.
+# Do NOT "fix" this by leaving the needles POSIX-only and calling it covered.
 relocatability_assert() { # <prefix> <build_path> <src_path> [extra_needle...]
   local prefix="${1:?prefix required}" build="${2:?build path required}" src="${3:?src path required}"
   shift 3
   local rc=0 hits needle escaped
+
+  # Resolve a COFF-capable objcopy once, up front. Debian/Ubuntu (and most
+  # distro packaging of LLVM) ship it under a versioned name -- llvm-objcopy
+  # bare is frequently absent even when LLVM is installed -- so a fixed
+  # `llvm-objcopy` call silently never resolves on those hosts and the
+  # *.lib|*.obj branch below would never actually strip anything. Honour an
+  # explicit override first, then fall back through plausible versioned
+  # names. If nothing resolves, coff_strip_tool stays empty; the *.lib|*.obj
+  # branch below then requires `-n "$coff_strip_tool"` before ever invoking
+  # it, so an unresolved tool fails closed (the file is treated as a real
+  # leak, never exempted) rather than silently doing nothing.
+  local coff_strip_tool=""
+  if [ -n "${LLVM_OBJCOPY:-}" ] && command -v "${LLVM_OBJCOPY}" >/dev/null 2>&1; then
+    coff_strip_tool="${LLVM_OBJCOPY}"
+  else
+    local _coff_cand
+    for _coff_cand in llvm-objcopy llvm-objcopy-18 llvm-objcopy-17; do
+      if command -v "$_coff_cand" >/dev/null 2>&1; then
+        coff_strip_tool="$_coff_cand"
+        break
+      fi
+    done
+  fi
 
   for needle in "$build" "$src" "$@"; do
     # Match the needle only at a genuine path boundary (not preceded by an
@@ -111,6 +182,26 @@ relocatability_assert() { # <prefix> <build_path> <src_path> [extra_needle...]
               : # path was debug-only -> exempt
             else
               surviving="$surviving $f"   # survives strip (or strip failed) -> real
+            fi
+            rm -f "$tmp"
+            ;;
+          *.lib|*.obj)
+            # COFF. objcopy cannot read these; llvm-objcopy (resolved above,
+            # honouring versioned names like llvm-objcopy-18) can. Note this
+            # branch is currently unreachable in practice --
+            # RELOC_ALLOW_DEBUG_PATHS is gated to sanitizer variants and
+            # Windows is default-only -- but the tool must be correct if a
+            # future sanitizer variant ever lands there. If no COFF strip
+            # tool resolved, coff_strip_tool is empty, the `-n` check below
+            # fails, and the file is treated as a real leak -- fail closed,
+            # never exempted.
+            tmp="$(mktemp)"
+            if [ -n "$coff_strip_tool" ] \
+                 && "$coff_strip_tool" --strip-debug "$f" "$tmp" 2>/dev/null \
+                 && ! grep -qE -- "$pattern" "$tmp"; then
+              : # path was debug-only -> exempt
+            else
+              surviving="$surviving $f"   # survives strip (or strip failed, or no tool) -> real
             fi
             rm -f "$tmp"
             ;;

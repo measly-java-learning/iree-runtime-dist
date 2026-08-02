@@ -10,9 +10,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/lib/linked-components.sh"
 
-PREFIX="${1:?usage: gen-notices.sh <prefix> <iree-src> <build-dir>}"
+PREFIX="${1:?usage: gen-notices.sh <prefix> <iree-src> <build-dir> <platform>}"
 IREE_SRC="${2:?iree-src required}"
 BUILD_DIR="${3:?build-dir required}"
+PLATFORM="${4:?platform required}"
 
 [ -d "$IREE_SRC" ]  || { echo "error: iree-src '$IREE_SRC' is not a directory" >&2; exit 2; }
 [ -d "$BUILD_DIR" ] || { echo "error: build-dir '$BUILD_DIR' is not a directory" >&2; exit 2; }
@@ -41,7 +42,7 @@ candidate_roots() { # <component-name>
   echo "$BUILD_DIR/_deps/${1}_src-src"
 }
 
-for name in $IREE_LINKED_COMPONENTS; do
+for name in $(linked_components "$PLATFORM"); do
   found=""
   while IFS= read -r root; do
     for cand in LICENSE LICENSE.txt LICENSE.md COPYING NOTICE; do
