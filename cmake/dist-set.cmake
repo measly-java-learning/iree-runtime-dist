@@ -13,10 +13,34 @@
 # type would therefore silently drop exactly the keys that differ from what we
 # declared -- the only interesting case.
 #
-# Include me from every -C file. A macro is not a cache variable and does not
+# Include me from every -C file. A function is not a cache variable and does not
 # persist between -C scripts, so each one needs its own include.
+#
+# A function(), NOT a macro(), and that is load-bearing rather than stylistic.
+# Macro arguments are substituted TEXTUALLY into the body, which is then
+# re-parsed as a command -- so a value containing backslashes is rescanned for
+# escape sequences. cmake/windows-x86_64.cmake composes
+# "-d1trimfile:$ENV{IREE_SRC_NATIVE}\", and IREE_SRC_NATIVE is cygpath -w
+# output, so the value carries single backslashes BY DESIGN (that is exactly
+# what /d1trimfile: needs -- cl emits __FILE__ as C:\..., and the trim is a
+# literal prefix match; a POSIX-form prefix matches nothing and silently ships
+# absolute paths). Under a macro, the \U in C:\Users\... is read as an escape
+# and the re-parse fails with "Syntax error ... Invalid escape sequence \U",
+# blamed on the set() line below rather than on the caller.
+#
+# Function arguments are ordinary variables, and variable-expansion results are
+# never rescanned for escapes -- so ${value} arrives verbatim, whatever it
+# contains. A direct set(... CACHE ...) at each call site would be safe for the
+# same reason; it is the macro indirection that is escape-unsafe.
+#
+# This was a hard failure only on the Windows runner. Under CMP0010 OLD the
+# re-parse is a mere developer warning and the value still lands correctly, so
+# a CMake 3.x host builds green; CMake 4.x removed the OLD behaviour of every
+# pre-3.5 policy, making it fatal. test/cmake_init.test.sh pins CMP0010 NEW so
+# the regression is caught hermetically on any CMake instead of 40 minutes into
+# a Windows CI job.
 
-macro(dist_set key value type doc)
+function(dist_set key value type doc)
   # ${ARGN} carries an optional trailing FORCE, which cmake/variant-tsan.cmake
   # needs: it re-declares an entry the platform file already created, and a
   # non-FORCE set() on an existing cache entry is a no-op.
@@ -39,4 +63,4 @@ macro(dist_set key value type doc)
   list(REMOVE_DUPLICATES _dist_keys)
   set(IREE_DIST_DECLARED_KEYS "${_dist_keys}" CACHE INTERNAL
       "Cache keys declared by iree-runtime-dist's -C files; gen-manifest.sh reads this")
-endmacro()
+endfunction()

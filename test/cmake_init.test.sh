@@ -50,14 +50,14 @@ done
   && printf 'ok: cmake/dist-set.cmake exists\n' \
   || { printf 'FAIL: cmake/dist-set.cmake missing\n' >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); }
 
-# 2. Whether every -C file can reach dist_set() is NOT checked here. A macro
+# 2. Whether every -C file can reach dist_set() is NOT checked here. A function
 #    does not persist between -C scripts, so each file needs the include
 #    directly or through one -- cmake/linux-{x86_64,aarch64}.cmake are thin
 #    wrappers that reach it through gnu-toolchain.cmake. Deciding that from
 #    file text means reimplementing CMake's include resolution in shell, and a
 #    direct-text check would instead demand a redundant include in the
 #    wrappers, which proves nothing about whether the real chain works.
-#    Configure output settles it exactly: a file that cannot reach the macro
+#    Configure output settles it exactly: a file that cannot reach the function
 #    dies with "Unknown CMake command \"dist_set\"", and IREE_DIST_DECLARED_KEYS
 #    in CMakeCache.txt names every file's contribution. That is the Step 10
 #    probe's job, and from Task 5 on it is what gen-manifest.sh reads.
@@ -99,6 +99,56 @@ for f in "$root"/cmake/*.cmake; do
   esac
 done
 [ "$reldbg" -eq 0 ] && printf 'ok: no cache-init file declares RelWithDebInfo\n'
+
+# 5. dist_set() must accept a value containing backslashes. This is the ONE
+#    assertion in this file that actually runs cmake, because it is a property
+#    of CMake's argument evaluation and cannot be decided from file text --
+#    reimplementing CMake's escape rules in shell is exactly the thing not to do.
+#
+#    Why it matters: cmake/windows-x86_64.cmake composes
+#    -d1trimfile:$ENV{IREE_SRC_NATIVE}\ , and IREE_SRC_NATIVE is cygpath -w
+#    output, so the value carries single backslashes by construction (that is
+#    what /d1trimfile: needs -- cl emits __FILE__ as C:\..., and the trim is a
+#    literal prefix match). Passed through a macro, ${value} is substituted
+#    TEXTUALLY into the macro body and the body is then re-parsed as a command,
+#    so \U in C:\Users\... is read as an escape sequence and the parse fails.
+#    A function does not re-parse: its arguments are ordinary variables, and
+#    variable-expansion results are never rescanned for escapes.
+#
+#    CMP0010 NEW is set explicitly rather than left at whatever the local
+#    default is. Under OLD this is only a developer warning and the value still
+#    lands, so a CMake 3.x host sees a green build; CMake 4.x removed the OLD
+#    behaviour of every pre-3.5 policy, which makes it a hard "Syntax error ...
+#    Invalid escape sequence \U" -- and GitHub owns the windows-2022 runner's
+#    CMake. Pinning the policy here makes the test reproduce the runner's
+#    failure on any CMake, instead of only on the host that already has 4.x.
+if command -v cmake >/dev/null 2>&1; then
+  _t="$(mktemp -d)"
+  trap 'rm -rf "$_t"' EXIT
+  mkdir -p "$_t/src"
+  printf 'cmake_minimum_required(VERSION 3.20)\nproject(p NONE)\n' > "$_t/src/CMakeLists.txt"
+  # A realistic cygpath -w root with a trailing backslash, the exact shape
+  # cmake/windows-x86_64.cmake builds. \U is not a valid CMake escape.
+  {
+    printf 'cmake_policy(SET CMP0010 NEW)\n'
+    printf 'include("%s/cmake/dist-set.cmake")\n' "$root"
+    printf 'set(_trim "-d1trimfile:C:\\\\Users\\\\runneradmin\\\\iree\\\\")\n'
+    printf 'dist_set(BACKSLASH_PROBE "-DWIN32 ${_trim}" STRING "" FORCE)\n'
+  } > "$_t/probe.cmake"
+  if _out="$(cmake -C "$_t/probe.cmake" -S "$_t/src" -B "$_t/b" 2>&1)"; then
+    printf 'ok: dist_set accepts a backslash-bearing value\n'
+    _got="$(grep -m1 '^BACKSLASH_PROBE:' "$_t/b/CMakeCache.txt" || true)"
+    assert_eq "$_got" \
+      'BACKSLASH_PROBE:STRING=-DWIN32 -d1trimfile:C:\Users\runneradmin\iree\' \
+      'dist_set stores the backslash value verbatim'
+  else
+    printf 'FAIL: dist_set rejects a backslash-bearing value (the Windows /d1trimfile: shape)\n' >&2
+    printf '%s\n' "$_out" | sed 's/^/  | /' >&2
+    ASSERT_FAILS=$((ASSERT_FAILS+1))
+  fi
+else
+  printf 'skip: cmake not on PATH; backslash-value check not run\n'
+fi
 
 [ "$ASSERT_FAILS" -eq 0 ] || exit 1
 echo "cmake_init: all assertions passed"
