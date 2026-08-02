@@ -40,7 +40,7 @@ jobs:
         # `bash --noprofile --norc -eo pipefail {0}`, so the pipeline's exit
         # status is the failure of any stage, not just the last.
         shell: bash
-        run: bash scripts/derive-version.sh "${GITHUB_REF_NAME}" | tr 'A-Z' 'a-z' >> "$GITHUB_OUTPUT"
+        run: bash scripts/derive-version.sh "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' >> "$GITHUB_OUTPUT"
       - id: submodules
         run: |
           . scripts/lib/submodules.sh
@@ -90,11 +90,10 @@ jobs:
         # UID/GID needs to be set here unlike w/ ExecuTorch dist because this runs
         # one step in a locally built container vs. the other which uses the widely available `manylinux`
         # container.
-        # TODO: Change COMPILER_VERSION to IREE_VERSION in the build script
         run: |
           docker run --rm \
             -v "${PWD}/dist":/work -v "${PWD}/iree":/iree \
-            -e COMPILER_VERSION="${{ needs.setup.outputs.iree_version }}" \
+            -e IREE_COMPILER_VERSION="${{ needs.setup.outputs.iree_version }}" \
             -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
             -w /work "${{ matrix.combo.container }}" \
             bash -lc '
@@ -216,44 +215,20 @@ jobs:
           ref: "v${{ needs.setup.outputs.iree_version }}"
           submodules: "${{ needs.setup.outputs.submodules }}"
 
-      # Resolve the VS install and llvm-nm path once
-      - name: Discover Visual Studio
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vswhere -latest -products * -property installationPath
-          if (-not $vsPath) { throw "vswhere found no Visual Studio installation" }
-          $llvmBin = "$vsPath\VC\Tools\Llvm\x64\bin"
-          if (-not (Test-Path "$llvmBin\llvm-nm.exe")) {
-            throw "llvm-nm.exe not found under $llvmBin -- build_smoke.sh would silently skip its symbol checks"
-          }
-          Add-Content -Path $env:GITHUB_PATH -Value $llvmBin
-          # Add-Content to avoid issues with UTF-8 BOM
-          Add-Content -Path $env:GITHUB_ENV -Value "VS_PATH=$vsPath"
-          echo "Visual Studio: $vsPath"
-      
       # Build IREE now that tool paths have been worked out
       - name: Build IREE
         shell: pwsh
         env:
-          COMPILER_VERSION: ${{ needs.setup.outputs.iree_version }}
-          VARIANT: ${{ matrix.variant }}
-          PLATFORM: ${{ matrix.platform }}
+          IREE_COMPILER_VERSION: ${{ needs.setup.outputs.iree_version }}
         run: |
-          if (-not $env:VS_PATH) { throw "VS_PATH unset — the 'Discover Visual Studio' step must run first" }
-          # Launch-VsDevShell mutates THIS process's env in place; the bash child inherits it.
-          & "$env:VS_PATH\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -SkipAutomaticLocation
-
-          # Set-Location, not `cd` in cmd (which does not switch drives without
-          # /D -- runners are D:-rooted). bash inherits this directory and the
-          # dev shell's PATH/INCLUDE/LIB.
-          Set-Location "$env:GITHUB_WORKSPACE\dist"
-
-          $bash = "${env:ProgramFiles}\Git\bin\bash.exe"
-          # TODO: Why do we call Set-Location and then use `cd $ws/dist`?  Seems redundant
-          # TODO: I'm not thrilled with this setup.  The script should already encode 'set -euo pipefile' and the ExecuTorch runtime didn't need the cygpath bits
-          & $bash -c 'set -euo pipefail; ws=$(cygpath -u $GITHUB_WORKSPACE); cd $ws/dist; ./build-runtime.sh --variant $VARIANT --platform $PLATFORM --prefix $ws/dist/out --iree-src $ws/iree'
-          if ($LASTEXITCODE -ne 0) { throw "shim build failed (exit $LASTEXITCODE)" }
+          # build-runtime.ps1 resolves VS, sources the dev shell, and finds
+          # Git-Bash; the recipe runs under it with args passed verbatim. In CI
+          # it also appends the VS LLVM bin dir to GITHUB_PATH, so the
+          # Structural checks step below still gets llvm-nm.
+          & ./dist/build-runtime.ps1 ./dist/build-runtime.sh `
+            --variant ${{ matrix.variant }} --platform ${{ matrix.platform }} `
+            --prefix "$PWD\dist\out" --iree-src "$PWD\iree"
+          if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
       - name: Structural checks
         shell: bash
@@ -291,12 +266,13 @@ jobs:
           path: dist/assets/
           if-no-files-found: error
 
-  # This job is Windows only, and the task at hand is extract the asset
+  # This job is Windows only, and the task at hand is to extract the asset
   # and compile something against the distribution
   verify:
-    # The acceptance gate. The runner has never seen the build tree
-    # or the IREE source -- exactly the consumer's situation. Only the extracted
-    # tarball and the test/consumer harness are mounted in.
+    # The acceptance gate. This job runs on a separate windows-2022 runner that
+    # has never seen the build tree or the IREE source -- exactly the consumer's
+    # situation. Only the downloaded artifact and the test/consumer harness (from
+    # checkout) are present; the job boundary is the isolation.
     needs: [setup, build-windows]
     runs-on: windows-2022
     permissions:
@@ -324,25 +300,27 @@ jobs:
         run: |
           mkdir -p extracted
           tar -xzf assets/*.tar.gz -C extracted
-
-      - name: Consumer e2e in a clean container
-        run: |
-          mapfile -d '' -t prefixes < <(find extracted -maxdepth 1 -mindepth 1 -type d -print0)
+          # The tarball stages exactly one top-level directory; record it for the
+          # consumer step, which runs under pwsh where this bash glob can't run.
+          shopt -s nullglob
+          prefixes=(extracted/*/)
           if [ "${#prefixes[@]}" -ne 1 ]; then
-            echo "error: expected exactly one top-level directory in the extracted tarball, found ${#prefixes[@]}:" >&2
+            echo "error: expected exactly one top-level directory in extracted/, found ${#prefixes[@]}:" >&2
             printf '  %s\n' "${prefixes[@]}" >&2
             exit 1
           fi
-          prefix="${prefixes[0]}"
-          docker run --rm \
-            -v "${PWD}/test":/test:ro -v "${PWD}/${prefix}":/prefix:ro \
-            -w /tmp "${BUILD_IMAGE}" \
-            bash -lc '
-              set -euo pipefail
-              export PATH=/opt/python/cp312-cp312/bin:$PATH
-              cp -r /test /tmp/t && cp -r /prefix /tmp/p
-              bash /tmp/t/consumer/run.sh /tmp/p
-            '
+          echo "PREFIX_PATH=${prefixes[0]%/}" >> "$GITHUB_ENV"
+
+      - name: Consumer e2e
+        shell: pwsh
+        run: |
+          if (-not $env:PREFIX_PATH) { throw "PREFIX_PATH unset — the 'Extract' step must run first" }
+          # build-runtime.ps1 resolves VS, sources the dev shell, and finds
+          # Git-Bash; run.sh compiles the consumer with MSVC against the
+          # extracted prefix. The isolation is the job boundary (see the job
+          # comment above): the runner has never seen the build tree.
+          & ./build-runtime.ps1 ./test/consumer/run.sh "$env:GITHUB_WORKSPACE\$env:PREFIX_PATH"
+          if ($LASTEXITCODE -ne 0) { throw "consumer e2e failed (exit $LASTEXITCODE)" }
 
   pin:
     needs: [setup, build, verify]

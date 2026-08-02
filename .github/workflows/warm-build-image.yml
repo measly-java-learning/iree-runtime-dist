@@ -13,54 +13,48 @@ on:
     # A warm on unrelated commits would just re-push identical layers.
     paths:
       - 'docker/**'
-      - 'scripts/lib/naming.sh'
       - '.github/workflows/warm-build-image.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  # Single source of truth for linux release platforms.
+  # Matches the JSON values present in release.yml
+  PLATFORMS: >-
+    [
+        {"platform":"linux-x86_64","container":"iree-runtime-dist-build:linux-x86_64", "runs_on":"ubuntu-latest"},
+        {"platform":"linux-aarch64","container":"iree-runtime-dist-build:linux-aarch64","runs_on":"ubuntu-24.04-arm"}
+    ]
+
 jobs:
-  platforms:
-    # Single source of truth for the platform list, same as release.yml's setup
-    # job -- so a platform added to scripts/lib/naming.sh warms without a second
-    # edit here. Only CONTAINER platforms get a build image to warm -- Windows
-    # is a release platform (release.yml uses the full platforms_json list) but
-    # not a build-image platform, so this uses containers_json instead.
+  setup:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     outputs:
-      list: ${{ steps.p.outputs.list }}
+      platforms: ${{ steps.platforms.outputs.platforms }}
     steps:
-      - uses: actions/checkout@v7
-      - id: p
+        # `tee -a` used in place of `>>` to simplify debugging
+      - id: platforms
         run: |
-          . scripts/lib/naming.sh
-          echo "list=$(containers_json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "platforms<<EOF"
+            echo "$PLATFORMS"
+            echo "EOF"
+          } | tee -a "$GITHUB_OUTPUT"
 
   warm:
-    needs: platforms
-    runs-on: ${{ matrix.runner }}
+    needs: setup
+    runs-on: ${{ matrix.combo.runner }}
     strategy:
       matrix:
-        platform: ${{ fromJson(needs.platforms.outputs.list) }}
-        include:
-          - platform: linux-x86_64
-            runner: ubuntu-latest
-          - platform: linux-aarch64
-            runner: ubuntu-24.04-arm
+        combo: ${{ fromJson(needs.setup.outputs.platforms) }}
     steps:
       - uses: actions/checkout@v7
       # Root checkout (no dist/), so tag/Dockerfile are unprefixed -- identical
       # resolution to release.yml's verify job.
-      - name: Resolve build image identity
-        env:
-          PLATFORM: ${{ matrix.platform }}
-        run: |
-          . scripts/lib/naming.sh
-          {
-            echo "BUILD_IMAGE=$(build_image_tag "$PLATFORM")"
-            echo "BUILD_DOCKERFILE=$(build_dockerfile "$PLATFORM")"
-          } >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v4.2.0
       - name: Warm the pinned toolchain image cache
         uses: docker/build-push-action@v7.3.0
@@ -68,7 +62,7 @@ jobs:
         # image. cache-to writes the layers the release runs read via cache-from.
         with:
           context: docker
-          file: ${{ env.BUILD_DOCKERFILE }}
-          tags: ${{ env.BUILD_IMAGE }}
+          file: "docker/${{ matrix.combo.platform }}.Dockerfile"
+          tags: ${{ matrix.combo.container }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
