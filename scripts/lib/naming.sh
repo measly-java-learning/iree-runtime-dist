@@ -16,4 +16,3 @@ sha_name()     { printf '%s.sha256' "$(tarball_name "$@")"; }
 # output instead.
 PLATFORMS="linux-x86_64 linux-aarch64 windows-x86_64"
 known_platforms() { printf '%s\n' $PLATFORMS; }
-

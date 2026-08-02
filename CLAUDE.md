@@ -17,7 +17,6 @@ Design: `docs/superpowers/specs/2026-07-19-iree-runtime-dist-design.md`.
 
 ```bash
 bash test/run.sh                                    # hermetic unit tests; no build, no container
-./build-runtime.sh --print-flags --variant default   # effective cmake flags without building
 bash test/build_smoke.sh out                          # structural check of a built prefix
 bash test/consumer/run.sh out                         # consumer e2e (run in a clean container)
 ```
@@ -72,29 +71,54 @@ each is a specific, load-bearing, commented repair for a specific upstream omiss
 empty or half-broken package.
 
 `scripts/lib/*.sh` are sourced by both the build and CI so the two cannot drift. When changing
-what they define, change it there, not at a call site. `effective_cmake_flags` in particular
-feeds the build, `--print-flags`, and `BUILDINFO`/`manifest.json` provenance, so recorded
-provenance cannot diverge from the build that produced it. It takes both `<variant>` and
-`<platform>` (e.g. Windows' `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` is platform-keyed, not
-variant-keyed) — the static-CRT choice must be greppable in its output rather than smuggled in
-via a raw `CMAKE_C_FLAGS` string, since a later task derives manifest.json's `crt` field from it.
+what they define, change it there, not at a call site.
 
-Not every platform is containerised. `platform_toolchain()` in `naming.sh` classifies each
-platform as `container` or `runner`. Container platforms (all Linux) take their toolchain from
-`docker/<platform>.Dockerfile`, and adding one is that Dockerfile plus a `PLATFORMS` entry,
-nothing else. Runner platforms (Windows) have no Dockerfile — the toolchain comes from a pinned
-GitHub runner image plus a VS dev-shell activation, and `build_image_tag`/`build_dockerfile`
-fail loudly if called for one. The container exists to pin a known-old glibc and the
-clang/lld/ninja NEVRAs; that has no Windows analog, and a Windows container would fix none of
-the Windows-specific problems. Pin the runner label (`windows-2022`, never `windows-latest`)
-for the same reason the Dockerfile pins NEVRAs: `msvc_toolset` is attested provenance and must
-not drift silently.
+Configuration is **declared**, not computed. `cmake/common.cmake` +
+`cmake/<platform>.cmake` + `cmake/variant-<variant>.cmake` are passed to `cmake -C` in that
+order — order is load-bearing, since the variant file appends to the `CMAKE_C_FLAGS` the platform
+file sets. `CMAKE_INSTALL_PREFIX` is the only remaining `-D`: the only genuinely per-invocation
+value. There is no `--print-flags`; the `cmake/` files are the human-facing view of the build
+inputs, and `manifest.json` is the attestation of what was actually used.
+
+`cmake/` holds **build inputs**; `lib/cmake/IreeRuntimeDist/` holds **shipped artifacts** a
+consumer's `find_package` reads. Nothing under `cmake/` is ever installed; nothing under
+`lib/cmake/` is ever a configure-time input. One glance at the path answers which side of the
+boundary a file is on. `patches/`, when it exists, is the same category as `cmake/`.
+
+Four CMake behaviours the cache-init layer depends on, each verified rather than assumed:
+
+- Multiple `-C` files compose in order, and a later file can read and extend an earlier one's
+  cache values.
+- Appending across `-C` files requires `FORCE`, since the earlier file already created the entry.
+- A command-line `-D` wins even against a `FORCE`d cache-init `set()` — `-C` files load first —
+  **but the override resets the entry's type to `UNINITIALIZED`.** This is why provenance filters
+  `CMakeCache.txt` by declared key *name* (the `IREE_DIST_DECLARED_KEYS` registry that `dist_set`
+  populates) and never by type: a type filter would drop exactly the keys that differ from what
+  we declared.
+- **`-C` does not fix the `CMAKE_<LANG>_FLAGS_INIT` clobber.** A cache-init file setting
+  `CMAKE_C_FLAGS` drops the platform `_INIT` contribution exactly as a command-line `-D` does. On
+  Linux that default is empty and the clobber is free; on MSVC it is not, which is why
+  `cmake/windows-x86_64.cmake` restates `-DWIN32 -D_WINDOWS -GR -EHsc`. Deleting that restatement
+  costs `/EHsc`, and every C++ TU touching `<ostream>` then fails C4530 under IREE's `-WX` — an
+  observed failure, 322 objects into a 40-minute build. `test/cmake_init.test.sh` guards it
+  hermetically.
+
+Compiler selection lives in the platform files (`clang`/`clang++` via `cmake/gnu-toolchain.cmake`;
+`find_program(... cl REQUIRED)` on Windows, so the resolved absolute path is what lands in the
+cache as provenance). The scissor is which compiler, not container-vs-runner — a future macOS
+platform would use clang without being containerised.
+
+Not every platform's toolchain is containerised. Linux toolchains come from
+`docker/<platform>.Dockerfile` (clang/lld/ninja NEVRAs, a known-old glibc); Windows has no
+Dockerfile — the toolchain comes from a pinned GitHub runner image (`windows-2022`, never
+`windows-latest`) plus a VS dev-shell activation. The runner label is pinned for the same reason
+the Dockerfile pins NEVRAs: `msvc_toolset` is attested provenance and must not drift silently.
 
 A prebuilt build image (`docker/<platform>.Dockerfile` → `iree-runtime-dist-build:<platform>`,
 built by `scripts/build-image.sh`) pins the toolchain (clang/lld/ninja NEVRAs) and saves the
 `dnf install` tax on every invocation. The image tag and its Dockerfile are both named by the
-platform token from `scripts/lib/naming.sh` (`build_image_tag`/`build_dockerfile`) — one token,
-so tag, Dockerfile, and artifact platform cannot drift. CI cannot pull this local
+platform token — `iree-runtime-dist-build:<platform>` from `docker/<platform>.Dockerfile` — one
+token, so tag, Dockerfile, and artifact platform cannot drift. CI cannot pull this local
 image — a GH runner never sees it — so `release.yml` instead builds the per-platform Dockerfile
 itself in every job that needs it, backed by GitHub Actions' layer cache
 (`cache-from`/`cache-to: type=gha`). That cache is ref-scoped, so a separate `warm-build-image.yml`
@@ -105,26 +129,28 @@ to, with no second copy to drift.
 
 ## Variant matrix
 
-Variants are single-sourced in `scripts/lib/variants.sh`: `known_variants <platform>` and
-`variants_json <platform>` (feeds the release matrix's `fromJson()` fan-out, mirroring how
-`naming.sh` feeds the platform matrix), `variant_cflags` (extra `CMAKE_C_FLAGS`/`CXX_FLAGS`, not a
-`-D` cache option), and `variant_sanitizer` (the `sanitizer` value recorded in
-`manifest.json`/`BUILDINFO`). `known_variants`/`variants_json` are platform-aware, not just
-platform-parameterized: `linux-*` builds `default tsan`, but `windows-*` builds `default` only —
-TSan is `-fsanitize=thread` under clang, which the MSVC toolchain does not provide, and the
-release matrix is a full variant × platform cross-product, so a platform-independent list would
-schedule an unbuildable `tsan`/`windows-x86_64` job. That exclusion lives in `variants.sh` rather
-than a workflow `exclude:` block, for the same single-source-of-truth reason as the rest of this
-section: a variant list is never hardcoded in a workflow, and a new variant (e.g. a future
-`tracy`) is a `variants.sh` change, not a workflow edit.
+Variants are single-sourced in two places, split by kind. `scripts/lib/variants.sh` owns
+`known_variants <platform>` — the one genuinely platform-dependent piece of logic, not expressible
+as a static file: `linux-*` builds `default tsan`, but `windows-*` builds `default` only, because
+TSan is `-fsanitize=thread` under clang and the MSVC toolchain does not provide it. The release
+matrix is a full variant × platform cross-product, so a platform-independent list would schedule
+an unbuildable job.
 
-`default` and `tsan` share `_runtime_capability_flags` (drivers, loaders, tracing-off) so the two
-cannot drift apart on capability — they differ **only** in `variant_cflags`: empty for `default`,
-`-fsanitize=thread -g` for `tsan`. `CMAKE_BUILD_TYPE` stays `Release` for both variants,
-**never `RelWithDebInfo`** — switching `tsan` to `RelWithDebInfo` renames the exported config
-(`IMPORTED_LOCATION_RELEASE` → `_RELWITHDEBINFO`), silently breaking the Release-hardcoded
-libbacktrace and relocatability repairs. `-g` via `variant_cflags` gives TSan symbolized frames
-without that config rename.
+The flags themselves are declared in `cmake/variant-<variant>.cmake`. `default` and `tsan` differ
+**only** there: `variant-default.cmake` declares no compiler flags (present-and-empty on purpose —
+`build-runtime.sh` passes the file unconditionally, so absent would be a configure error), and
+`variant-tsan.cmake` appends `-fsanitize=thread -g`. Every capability entry lives in
+`cmake/common.cmake`, which no variant file can reach, so the two cannot drift on what runtime they
+build. A new variant (e.g. a future `tracy`) is a new `cmake/variant-*.cmake` plus a
+`known_variants` case — never a workflow edit.
+
+`default` and `tsan` share every capability entry in `cmake/common.cmake` (drivers, loaders,
+tracing-off) so the two cannot drift apart on capability — they differ **only** in the flags each
+`cmake/variant-<variant>.cmake` declares: empty for `default`, `-fsanitize=thread -g` for `tsan`.
+`CMAKE_BUILD_TYPE` stays `Release` for both variants, **never `RelWithDebInfo`** — switching `tsan`
+to `RelWithDebInfo` renames the exported config (`IMPORTED_LOCATION_RELEASE` → `_RELWITHDEBINFO`),
+silently breaking the Release-hardcoded libbacktrace and relocatability repairs. `-g` via
+`variant-tsan.cmake` gives TSan symbolized frames without that config rename.
 
 The relocatability assertion (`scripts/relocatability.sh`) exempts DWARF-only build paths for
 sanitizer variants via `RELOC_ALLOW_DEBUG_PATHS` — `-g` embeds the build directory in debug info
@@ -156,12 +182,58 @@ computed.
 `msvc_toolset` records the `cl.exe` version the Windows archives were compiled with (detected
 from `cl`'s own version banner, `"unknown"` when `cl` isn't on `PATH`) — provenance, not a
 compatibility claim. `crt` records the C runtime model (`MT` = static `/MT`, `MD` = dynamic
-`/MD`), derived from `effective_cmake_flags`' `CMAKE_MSVC_RUNTIME_LIBRARY` cache value rather
+`/MD`), read from the build tree's `CMakeCache.txt` `CMAKE_MSVC_RUNTIME_LIBRARY` entry rather
 than hardcoded, so the manifest cannot claim a CRT the build didn't actually use. Same honesty
 standard as `glibc_build`: the archives carry only `/DEFAULTLIB:LIBCMT` directives, and the CRT
 itself is resolved at the *consumer's* final link, not embedded in the archive — `crt` is the
 CRT a consumer must match to avoid a mixed-CRT link, not a compatibility floor. `gen-manifest.sh`
 documents this in `notes.crt`, kept in sync the same way.
+
+`schema_version` stays `2`. `cmake_version`, `clang_version`, and `runtime_dist_commit` are
+additive and break no consumer — the same criterion under which the platform-conditional
+provenance keys were added.
+
+**The published `iree_compile_version` key is deliberately NOT renamed**, despite the internal
+`COMPILER_VERSION` → `IREE_COMPILER_VERSION` rename. It is the `iree-base-compiler` wheel version
+that pairs `add.vmfb`, not a C toolchain version; the name is already unambiguous, and it is schema
+surface. Do not "finish" the rename into it.
+
+Provenance is **observed, never reconstructed**. `build_config` is `CMakeCache.txt` filtered to the
+`IREE_DIST_DECLARED_KEYS` registry; `crt` comes from that cache's `CMAKE_MSVC_RUNTIME_LIBRARY`;
+`sanitizer` from the presence of `-fsanitize=thread` in its `CMAKE_C_FLAGS`; `iree_tag` from
+`git describe` rather than `"v" + iree_version`. Consequently `gen-manifest.sh` takes a
+`<build-dir>` and a manifest cannot be regenerated from an installed prefix alone — that is the
+point, not a regression.
+
+`cmake_version` records the configure-time CMake. CMake is deliberately **not pinned**: a NEVRA pin
+is possible in the Dockerfile but GitHub owns the `windows-2022` runner's CMake, and pinning only
+the container would buy a strong guarantee on the already-stable platform while leaving the
+uncontrollable one silently floating — a half-pin hides risk rather than reducing it. Recording the
+version is the mitigation, and it is strictly more useful than a pin: it answers "which CMake built
+this artifact" for a *shipped tarball*, which a Dockerfile pin cannot do for the Windows half at
+all.
+
+`runtime_dist_commit` records which version of *this recipe* produced the artifact — every repair,
+the packaging, and the whole build recipe come from here, and until now a shipped tarball could not
+say. `git describe --always --dirty`: the `-dirty` marker only ever annotates hand builds, since CI
+is always clean, and that is exactly where it matters.
+
+`clang_version` is the Linux analog of `msvc_toolset`, from the compiler's own banner. Provenance,
+not a compatibility claim.
+
+`build_config` is observed, then **path-normalized**: the build machine's IREE source root and
+build directory are rewritten to `@IREE_SOURCE_ROOT@` / `@IREE_BUILD_DIR@`, and nothing else is
+touched. `CMAKE_C_FLAGS`/`CMAKE_CXX_FLAGS` are path-dependent by construction — clang's
+`-ffile-prefix-map=$IREE_SRC=iree`, MSVC's `-d1trimfile:$IREE_SRC_NATIVE\` — and both
+`manifest.json` and `BUILDINFO` ship *inside the prefix*, so publishing the cache verbatim leaks
+the builder's mount point into two shipped files and `relocatability_assert` fails the build (from
+Phase 4, the pass that covers Phase 3 outputs). The normalization lives in `emit-manifest.py`, the
+single point that feeds both files, rather than in `relocatability_repair` — and it is a token
+rewrite, not a rewrite to a plausible-looking value, so the manifest never claims a flag the build
+did not use. Toolchain paths (`CMAKE_C_COMPILER`, the resolved `cl.exe`) are deliberately left
+absolute: naming the exact compiler is the provenance, and it is not a path the artifact asks a
+consumer to resolve. Never add a toolchain prefix to the normalized roots, and never fix a leak
+here by narrowing the assertion.
 
 ## Testing
 
@@ -188,6 +260,13 @@ when `relocatability_assert` is invoked with the **container-internal** build an
 leaked *host* paths (which never appear in the build in the first place) would make the assertion
 pass trivially without proving anything. Run the recipe inside the container end to end so the
 paths the assertion checks are the ones that could actually leak.
+
+`test/cmake_init.test.sh` is hermetic and asserts two things about the `cmake/` layer: that a
+cache-init file exists for every `known_platforms` entry and every variant each platform builds
+(so "added a platform, forgot the file" fails in a second rather than at configure time on one
+platform), and that `cmake/windows-x86_64.cmake` restates `-GR -EHsc` in the C++ flags and not in
+the C flags. The second is a deletion guard, not a value check — the only other thing that catches
+a dropped `-EHsc` is a 40-minute Windows build failing 322 objects in.
 
 ## Conventions
 

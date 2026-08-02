@@ -24,7 +24,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${1:?usage: gen-addvmfb.sh <prefix> <compiler-version>}"
-COMPILER_VERSION="${2:?compiler-version required}"
+IREE_COMPILER_VERSION="${2:?compiler-version required}"
 
 OUT_DIR="$PREFIX/share/iree-runtime-dist"
 mkdir -p "$OUT_DIR"
@@ -58,7 +58,7 @@ elif [ -d "$venv/Scripts" ]; then VENV_BIN="$venv/Scripts"
 else echo "error: venv at '$venv' has neither bin/ nor Scripts/" >&2; exit 1
 fi
 
-"$VENV_BIN/pip" install --quiet "iree-base-compiler==${COMPILER_VERSION}"
+"$VENV_BIN/pip" install --quiet "iree-base-compiler==${IREE_COMPILER_VERSION}"
 
 # iree-compile embeds its INPUT path (as MLIR location info) into the compiled
 # module -- an absolute input path therefore leaks the build machine's
@@ -74,4 +74,4 @@ fi
     -o "$OUT_DIR/add.vmfb"
 )
 
-echo "==> compiled add.vmfb with iree-base-compiler==${COMPILER_VERSION}"
+echo "==> compiled add.vmfb with iree-base-compiler==${IREE_COMPILER_VERSION}"
