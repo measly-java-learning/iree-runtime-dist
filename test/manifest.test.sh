@@ -89,11 +89,24 @@ git -C "$fx/iree-src" -c user.email=test@example.com -c user.name=test \
 # a tag for the observation to succeed.
 git -C "$fx/iree-src" tag v3.11.0
 
+# The linux fixture embeds the source root in the fake CMAKE_C_FLAGS, and the
+# token assertions below exist to prove emit-manifest.py rewrote that root.
+# gen-manifest.sh hands the root to emit-manifest.py as argv, so the needle
+# python actually compares against is NOT this fixture's POSIX spelling on a
+# Windows host: when Git Bash spawns a native python3, MSYS2 rewrites the
+# /tmp/... argv to the Windows spelling (verified: /tmp/abc/iree-src arrives
+# as C:/Users/.../Temp/abc/iree-src). Asking python to echo the path back is
+# exactly the oracle -- whatever it prints is the needle it will receive
+# through gen-manifest.sh, on Linux (no rewrite) and under Git Bash alike --
+# and the fake cache must be written in THAT spelling, or the rewrite silently
+# no-ops and the token assertions fail on the windows CI's Git Bash shell.
+src_view="$(python3 -c 'import sys; print(sys.argv[1])' "$fx/iree-src")"
+
 # Fake build trees (gen-manifest.sh's new <build-dir> argument). The windows
 # tree embeds the native-spelled source root in its -d1trimfile: flag, and the
 # gen-manifest.sh calls below export IREE_SRC_NATIVE so the normalizer's
 # backslash needle (and its forward-slash twin) is exercised hermetically.
-fake_cache "$fx/linux-build" linux-x86_64 "$fx/iree-src"
+fake_cache "$fx/linux-build" linux-x86_64 "$src_view"
 fake_cache "$fx/windows-build" windows-x86_64 "$fx/iree-src" 'C:\work\iree'
 
 # Fake installed VM bytecode header, one copy per fixture prefix.
