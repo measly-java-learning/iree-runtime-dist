@@ -27,7 +27,7 @@ jobs:
       platforms: ${{ steps.platforms.outputs.platforms }}
       # This is the version without any `v` prefix required for tag identification
       iree_version: ${{ steps.derive.outputs.iree_version }}
-      submodules: ${{ steps.submodules.outputs.list }}
+      submodules: ${{ steps.derive.outputs.submodules }}
     steps:
         # `tee -a` used in place of `>>` to simplify debugging
       - id: platforms
@@ -43,11 +43,10 @@ jobs:
         # `bash --noprofile --norc -eo pipefail {0}`, so the pipeline's exit
         # status is the failure of any stage, not just the last.
         shell: bash
-        run: bash scripts/derive-version.sh "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' >> "$GITHUB_OUTPUT"
-      - id: submodules
         run: |
+          bash scripts/derive-version.sh "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' >> "$GITHUB_OUTPUT"
           . scripts/lib/submodules.sh
-          echo "list=$(required_submodules)" >> "$GITHUB_OUTPUT"
+          echo "submodules=$(required_submodules)" >> "$GITHUB_OUTPUT"
       # test/workflow_paths.test.sh SKIPS when PyYAML is missing, so that a
       # contributor's python3 is never something this repo installs into.
       # Installing it here is what makes that skip safe: on the release path the
@@ -126,24 +125,12 @@ jobs:
                 --prefix /work/out --iree-src /iree
             '
 
-      - name: Structural checks
-        shell: bash
-        working-directory: dist
-        run: |
-          bash test/build_smoke.sh out
-          bash test/manifest.test.sh out
-          bash test/constants.test.sh out
-          bash test/notices.test.sh out
-          bash test/cmake_additions.test.sh out
+      - uses: ./dist/.github/actions/check-and-package
+        with:
+          variant: ${{ matrix.variant }}
+          platform: ${{ matrix.combo.platform }}
+          version: ${{ needs.setup.outputs.iree_version }}
 
-      - name: Package
-        shell: bash
-        working-directory: dist
-        run: |
-          bash scripts/package.sh out \
-            "${{ needs.setup.outputs.iree_version }}" \
-            "${{ matrix.variant }}" "${{ matrix.combo.platform }}" assets
-      
         # By extracting, we can stage clean source to give to a new container
         # This container won't have access to the IREE source, validating that
         # everything a consumer needs is present in the compressed tarball
@@ -262,23 +249,11 @@ jobs:
             --prefix "$PWD\dist\out" --iree-src "$PWD\iree"
           if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
-      - name: Structural checks
-        shell: bash
-        working-directory: dist
-        run: |
-          bash test/build_smoke.sh out
-          bash test/manifest.test.sh out
-          bash test/constants.test.sh out
-          bash test/notices.test.sh out
-          bash test/cmake_additions.test.sh out
-
-      - name: Package
-        shell: bash
-        working-directory: dist
-        run: |
-          bash scripts/package.sh out \
-            "${{ needs.setup.outputs.iree_version }}" \
-            "${{ matrix.variant }}" "${{ matrix.platform }}" assets
+      - uses: ./dist/.github/actions/check-and-package
+        with:
+          variant: ${{ matrix.variant }}
+          platform: ${{ matrix.platform }}
+          version: ${{ needs.setup.outputs.iree_version }}
 
         # Not thrilled that we have `dist/assets/assets-variant-platform`
         # ExecuTorch uses dist/dist-variant-platform`, should be using same scheme
@@ -298,9 +273,11 @@ jobs:
           path: dist/assets/
           if-no-files-found: error
 
-  # This job is Windows only, and the task at hand is to extract the asset
-  # and compile something against the distribution
-  verify:
+  # Windows only -- extract the asset and compile something against it. The
+  # Linux equivalent runs inside `build`, where the clean container is the
+  # isolation; hence the -windows suffix rather than a bare `verify`, which
+  # would read as the gate for every platform.
+  verify-windows:
     # The acceptance gate. This job runs on a separate windows-2022 runner that
     # has never seen the build tree or the IREE source -- exactly the consumer's
     # situation. Only the downloaded artifact and the test/consumer harness (from
@@ -354,29 +331,11 @@ jobs:
           & ./build-runtime.ps1 ./test/consumer/run.sh "$env:GITHUB_WORKSPACE\$env:PREFIX_PATH"
           if ($LASTEXITCODE -ne 0) { throw "consumer e2e failed (exit $LASTEXITCODE)" }
 
-  pin:
-    needs: [setup, build, verify]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          path: downloaded
-          merge-multiple: true
-      - run: |
-          bash scripts/gen-pin.sh \
-            "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" \
-            "${{ needs.setup.outputs.iree_version }}" \
-            downloaded IreeRuntimePin.cmake
-      - uses: actions/upload-artifact@v7
-        with:
-          name: pin
-          path: IreeRuntimePin.cmake
-
   release:
-    needs: [setup, pin]
+    # Depends on every build job AND the Windows gate: nothing is published
+    # until each artifact exists and the one that needs an out-of-job consumer
+    # check has passed it.
+    needs: [setup, build, build-windows, verify-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -386,6 +345,19 @@ jobs:
         with:
           path: release
           merge-multiple: true
+
+      # Formerly its own `pin` job. It only ever needed the assets that
+      # download-artifact already put in release/, so the separate job bought a
+      # checkout, an upload and a download to move one generated file between
+      # runners. Writing it straight into release/ means it joins the
+      # `release/*` glob below with no pattern to update; gen-pin.sh globs
+      # *.sha256, so a .cmake sibling in the same directory is inert to it.
+      - name: Generate the consumer pin
+        run: |
+          bash scripts/gen-pin.sh \
+            "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" \
+            "${{ needs.setup.outputs.iree_version }}" \
+            release release/IreeRuntimePin.cmake
 
       - name: Build the metadata zip (once per release; variant-independent)
         run: |

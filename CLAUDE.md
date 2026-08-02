@@ -17,7 +17,8 @@ Design: `docs/superpowers/specs/2026-07-19-iree-runtime-dist-design.md`.
 
 ```bash
 bash test/run.sh                                    # hermetic unit tests; no build, no container
-bash test/build_smoke.sh out                          # structural check of a built prefix
+bash test/structural.sh out                           # every structural check against a built prefix
+bash test/build_smoke.sh out                          # just the smoke half of the above
 bash test/consumer/run.sh out                         # consumer e2e (run in a clean container)
 ```
 
