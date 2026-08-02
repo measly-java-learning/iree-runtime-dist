@@ -341,8 +341,20 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
+      # `pattern:` is load-bearing, not tidiness. An unfiltered download pulls
+      # EVERY artifact the run produced, and the build jobs do not control that
+      # namespace: docker/build-push-action uploads a build record of its own
+      # (`<owner>.<repo>.<id>.dockerbuild`) per invocation. In v3.11.0-11 four of
+      # those reached the published release via the `release/*` glob below --
+      # and because this repo has immutable releases enabled, they could not be
+      # deleted afterwards. The glob stays bare on purpose (a new RELEASE
+      # artifact needs no pattern edit); the filter belongs here, at the point
+      # where foreign artifacts enter, and the upload names it pairs with are
+      # `assets-<variant>-<platform>` from check-and-package.
+      # test/workflow_paths.test.sh enforces that a publishing job filters.
       - uses: actions/download-artifact@v8
         with:
+          pattern: assets-*
           path: release
           merge-multiple: true
 

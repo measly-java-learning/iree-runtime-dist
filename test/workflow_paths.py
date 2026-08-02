@@ -91,6 +91,45 @@ def checkout_root(steps):
     return ""
 
 
+def check_publishing_jobs_filter(name, doc):
+    """Invariant 3: a job that publishes must not download artifacts unfiltered.
+
+    An unfiltered actions/download-artifact pulls every artifact the run
+    produced, and a build job does not own that namespace: build-push-action
+    uploads a `.dockerbuild` build record per invocation. v3.11.0-11 published
+    four of them, and immutable releases meant they could not be deleted. The
+    release step's `release/*` glob is deliberately bare, so the filter has to
+    be here -- which makes its absence a silent, unrecoverable defect rather
+    than a noisy one.
+    """
+    for job_id, job in (doc.get("jobs") or {}).items():
+        steps = job.get("steps") or []
+        publishes = any(
+            "gh release" in str(step.get("run", "")) for step in steps
+        )
+        if not publishes:
+            continue
+
+        label = f"{name}:{job_id}"
+        downloads = [
+            s for s in steps if str(s.get("uses", "")).startswith("actions/download-artifact@")
+        ]
+        if not downloads:
+            ok(f"{label}: publishes but downloads no artifacts")
+            continue
+        for step in downloads:
+            with_ = step.get("with") or {}
+            if not (with_.get("pattern") or with_.get("name")):
+                bad(
+                    f"{label}: publishing job downloads artifacts unfiltered",
+                    "add `pattern:` -- an unfiltered download sweeps foreign "
+                    "artifacts (e.g. build-push-action's .dockerbuild records) "
+                    "into the published release",
+                )
+            else:
+                ok(f"{label}: publishing job filters its artifact download")
+
+
 def check_path_prefixes(repo, name, doc):
     """Invariant 1: workspace-root-resolved paths carry the job's checkout root."""
     for job_id, job in (doc.get("jobs") or {}).items():
@@ -136,8 +175,10 @@ def main():
     repo = pathlib.Path(sys.argv[1])
     for wf in sorted((repo / ".github" / "workflows").glob("*.yml")):
         text = wf.read_text()
-        check_matrix_keys(wf.name, yaml.safe_load(text), text)
-        check_path_prefixes(repo, wf.name, yaml.safe_load(text))
+        doc = yaml.safe_load(text)
+        check_matrix_keys(wf.name, doc, text)
+        check_path_prefixes(repo, wf.name, doc)
+        check_publishing_jobs_filter(wf.name, doc)
 
     if FAILS:
         print(f"\n{FAILS} assertion(s) FAILED", file=sys.stderr)
