@@ -39,14 +39,16 @@ require_value() { # <flag>
 }
 
 # Two places below repair upstream packaging gaps that exist only in the
-# clang/Linux build: the libbacktrace_impl target build, and the printf +
-# libbacktrace install repairs. Both were guarded on naming.sh's
-# platform_toolchain(), which commit 4bb545b deleted along with the rest of the
-# CI-topology helpers -- so both guards were left calling a function that no
-# longer exists. One predicate, local to this script, rather than two open-coded
-# platform comparisons: these guards must agree, because building
-# libbacktrace_impl without installing it (or vice versa) fails much later and
-# much less clearly than either failing here.
+# clang/Linux build: the libbacktrace_impl target build and the libbacktrace
+# install repair. (The printf install repair is NOT Linux-only -- the Runtime
+# export set carries printf_printf on Windows too -- so it is deliberately not
+# inside these guards; see its comment at the install site.) Both libbacktrace
+# guards were guarded on naming.sh's platform_toolchain(), which commit 4bb545b
+# deleted along with the rest of the CI-topology helpers -- so both guards were
+# left calling a function that no longer exists. One predicate, local to this
+# script, rather than two open-coded platform comparisons: these guards must
+# agree, because building libbacktrace_impl without installing it (or vice
+# versa) fails much later and much less clearly than either failing here.
 #
 # This is deliberately NOT a revived platform_toolchain(). That classified a
 # platform's CI topology -- container vs runner -- which is a property of how the
@@ -299,6 +301,20 @@ for _component in IREEDevLibraries-Runtime IREEBundledLibraries IREECMakeExports
   cmake --install "$BUILD_DIR" --component "$_component" --prefix "$PREFIX"
 done
 
+# IREE's top-level CMakeLists.txt does `add_subdirectory(build_tools/third_party/printf
+# EXCLUDE_FROM_ALL)`. CMake's documented behavior for an EXCLUDE_FROM_ALL subdirectory is
+# that its cmake_install.cmake is never chained into the parent directory's install script
+# -- so the component-scoped installs above never reach it, even though the export set's
+# IREETargets-Runtime-release.cmake references the archive via IMPORTED_LOCATION
+# (libprintf_printf.a on Linux, printf_printf.lib on MSVC). This install must run on EVERY
+# platform, deliberately NOT inside the platform_is_msvc guard below: the Runtime export
+# set carries printf_printf on Windows too, and that guard swallowing this install shipped
+# a Windows prefix that fails find_package(IREE) with "imported target printf_printf
+# references ... printf_printf.lib but this file does not exist".
+# Install that one subdirectory's IREEBundledLibraries component explicitly, or the printf
+# archive silently never lands in $PREFIX/lib despite the export set claiming it exists.
+cmake --install "$BUILD_DIR/build_tools/third_party/printf" --component IREEBundledLibraries --prefix "$PREFIX"
+
 # libbacktrace is a Linux-only repair. On Windows IREE emits no install rule for
 # it, ships no libbacktrace*.lib, references zero backtrace_* symbols across all
 # 191 archives, and omits it from iree_base_base's INTERFACE_LINK_LIBRARIES. It
@@ -307,15 +323,6 @@ done
 # archive exist": an existence check would silently no-op if the Linux archive
 # ever went missing, turning a loud failure into a quiet one.
 if ! platform_is_msvc "$PLATFORM"; then
-
-# IREE's top-level CMakeLists.txt does `add_subdirectory(build_tools/third_party/printf
-# EXCLUDE_FROM_ALL)`. CMake's documented behavior for an EXCLUDE_FROM_ALL subdirectory is
-# that its cmake_install.cmake is never chained into the parent directory's install script
-# -- so the component-scoped installs above never reach it, even though the export set's
-# IREETargets-Runtime-release.cmake references libprintf_printf.a via IMPORTED_LOCATION.
-# Install that one subdirectory's IREEBundledLibraries component explicitly, or the printf
-# archive silently never lands in $PREFIX/lib despite the export set claiming it exists.
-cmake --install "$BUILD_DIR/build_tools/third_party/printf" --component IREEBundledLibraries --prefix "$PREFIX"
 
 # build_tools/third_party/libbacktrace has the same EXCLUDE_FROM_ALL shape as printf
 # above, but worse: its CMakeLists.txt has NO install(TARGETS ...) rule at all for the
@@ -403,7 +410,7 @@ list(APPEND _cmake_import_check_files_for_libbacktrace_libbacktrace "${_IMPORT_P
 EOF
 fi
 
-fi # ! platform_is_msvc "$PLATFORM" (printf install + libbacktrace repair)
+fi # ! platform_is_msvc "$PLATFORM" (libbacktrace repair)
 
 # Remove compiler target files that were installed by the IREECMakeExports component.
 # The IREE compiler is explicitly out of contract for this project (-DIREE_BUILD_COMPILER=OFF),
