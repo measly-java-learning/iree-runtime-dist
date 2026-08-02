@@ -9,8 +9,15 @@
 
 # Which variants a platform builds. NOT platform-independent: tsan is
 # -fsanitize=thread under clang, which the MSVC/Windows toolchain does not
-# provide. release.yml fans out a full variant x platform cross-product, so
-# without this a windows tsan job would be scheduled and fail.
+# provide.
+#
+# release.yml no longer reads this: it fans out `[default, tsan]` x the Linux
+# PLATFORMS cross-product in `build`, and keeps Windows in a separate
+# `build-windows` job declaring `variant: [default]`. The unbuildable
+# windows x tsan leg is therefore prevented structurally by the job split
+# rather than by this list. What this list still owns is
+# test/cmake_init.test.sh's coverage matrix -- every variant a platform builds
+# must have a cmake/variant-<variant>.cmake.
 known_variants() { # <platform>
   case "${1:-}" in
     linux-*)   printf 'default tsan' ;;

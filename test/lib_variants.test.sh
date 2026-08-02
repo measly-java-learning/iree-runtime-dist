@@ -10,8 +10,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 assert_eq "$(known_variants linux-x86_64)"  "default tsan" "linux-x86_64 builds both variants"
 assert_eq "$(known_variants linux-aarch64)" "default tsan" "linux-aarch64 builds both variants"
 # tsan is -fsanitize=thread under clang, which the MSVC toolchain does not
-# provide. The release matrix is a full variant x platform cross-product, so a
-# platform-independent list would schedule an unbuildable job.
+# provide. release.yml keeps Windows in its own job to avoid scheduling that
+# leg; this list is what stops cmake_init.test.sh from demanding a
+# cmake/variant-tsan.cmake coverage entry for a platform that cannot build it.
 assert_eq "$(known_variants windows-x86_64)" "default"     "windows-x86_64 builds default only"
 
 # An unknown platform must FAIL, not return an empty list. An empty list

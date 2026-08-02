@@ -132,17 +132,22 @@ to, with no second copy to drift.
 Variants are single-sourced in two places, split by kind. `scripts/lib/variants.sh` owns
 `known_variants <platform>` — the one genuinely platform-dependent piece of logic, not expressible
 as a static file: `linux-*` builds `default tsan`, but `windows-*` builds `default` only, because
-TSan is `-fsanitize=thread` under clang and the MSVC toolchain does not provide it. The release
-matrix is a full variant × platform cross-product, so a platform-independent list would schedule
-an unbuildable job.
+TSan is `-fsanitize=thread` under clang and the MSVC toolchain does not provide it. This list is
+what `test/cmake_init.test.sh` walks to demand a `cmake/variant-<variant>.cmake` per platform ×
+variant, so it must not claim `tsan` on Windows.
+
+The release matrix does **not** read it. `release.yml` fans out `[default, tsan]` × the Linux
+`PLATFORMS` literal in `build`, and keeps Windows in a separate `build-windows` job declaring
+`variant: [default]` — the unbuildable `windows` × `tsan` leg is prevented by that job split, not
+by a declared list.
 
 The flags themselves are declared in `cmake/variant-<variant>.cmake`. `default` and `tsan` differ
 **only** there: `variant-default.cmake` declares no compiler flags (present-and-empty on purpose —
 `build-runtime.sh` passes the file unconditionally, so absent would be a configure error), and
 `variant-tsan.cmake` appends `-fsanitize=thread -g`. Every capability entry lives in
 `cmake/common.cmake`, which no variant file can reach, so the two cannot drift on what runtime they
-build. A new variant (e.g. a future `tracy`) is a new `cmake/variant-*.cmake` plus a
-`known_variants` case — never a workflow edit.
+build. A new variant (e.g. a future `tracy`) is a new `cmake/variant-*.cmake`, a `known_variants`
+case, and — since the matrix is declared in the workflow — a `release.yml` edit.
 
 `default` and `tsan` share every capability entry in `cmake/common.cmake` (drivers, loaders,
 tracing-off) so the two cannot drift apart on capability — they differ **only** in the flags each

@@ -24,8 +24,8 @@ env:
   # Matches the JSON values present in release.yml
   PLATFORMS: >-
     [
-        {"platform":"linux-x86_64","container":"iree-runtime-dist-build:linux-x86_64", "runs_on":"ubuntu-latest"},
-        {"platform":"linux-aarch64","container":"iree-runtime-dist-build:linux-aarch64","runs_on":"ubuntu-24.04-arm"}
+        {"platform":"linux-x86_64","container":"iree-runtime-dist-build:linux-x86_64", "runner":"ubuntu-latest"},
+        {"platform":"linux-aarch64","container":"iree-runtime-dist-build:linux-aarch64","runner":"ubuntu-24.04-arm"}
     ]
 
 jobs:
