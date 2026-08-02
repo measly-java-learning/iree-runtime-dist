@@ -2,16 +2,6 @@ name: release
 on:
   push:
     tags: ['v*-*']          # v<iree-version>-<pkgrev>, e.g. v3.11.0-1
-    # TEMPORARY (axis-1/axis-2 trial run) -- REMOVE before this branch merges;
-    # release.yml must be tag-only on main. Same device as 0a3fadb: exercise the
-    # workflow on this feature branch WITHOUT minting a release tag. A tag cut
-    # off a branch about to be rebased/squashed would publish real assets, and
-    # its attestation would be irreversible -- actions/attest writes to a public
-    # transparency log that deleting the tag and release does not retract.
-    # workflow_dispatch is not an option: it only registers from the default
-    # branch. Publication is made structurally impossible from a branch push by
-    # the guards on the attest steps and the `Create/Update release` step below.
-    branches: ['feat/windows-platform-add']
 
 permissions:
   contents: read
@@ -54,19 +44,7 @@ jobs:
         # status is the failure of any stage, not just the last.
         shell: bash
         run: |
-          # TEMPORARY (trial run) -- REVERTED with the branch trigger above. On a
-          # tag push `ref` is byte-for-byte GITHUB_REF_NAME and this is the
-          # original one-liner. On a branch push GITHUB_REF_NAME is a branch
-          # name, which derive-version.sh correctly rejects, so substitute a
-          # placeholder purely so the build jobs can run. The placeholder cannot
-          # reach a PUBLISHED asset name: the attest steps and the release
-          # publish step are gated to tag refs.
-          ref="${GITHUB_REF_NAME}"
-          case "${GITHUB_REF}" in
-            refs/tags/*) ;;
-            *) ref="v3.11.0-0" ;;
-          esac
-          bash scripts/derive-version.sh "$ref" | tr '[:upper:]' '[:lower:]' >> "$GITHUB_OUTPUT"
+          bash scripts/derive-version.sh "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' >> "$GITHUB_OUTPUT"
           . scripts/lib/submodules.sh
           echo "submodules=$(required_submodules)" >> "$GITHUB_OUTPUT"
       # test/workflow_paths.test.sh SKIPS when PyYAML is missing, so that a
@@ -209,12 +187,7 @@ jobs:
             '
 
         # We only attest the artifact if it can be consumed
-      # TEMPORARY (trial run) -- the `if:` is REVERTED with the branch trigger.
-      # An attestation is an irreversible public write, and a branch build would
-      # register one for a subject FILENAME identical to a real future release
-      # asset but with a different digest.
-      - if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/attest@v4
+      - uses: actions/attest@v4
         with:
           subject-path: dist/assets/*.tar.gz
 
@@ -287,10 +260,7 @@ jobs:
         # across the org
         # On Windows, we will attest based on the structural checks and have a separate
         # job for verifying full functionality
-      # TEMPORARY (trial run) -- the `if:` is REVERTED with the branch trigger.
-      # Same reason as the Linux attest step above.
-      - if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/attest@v4
+      - uses: actions/attest@v4
         with:
           subject-path: dist/assets/*.tar.gz
 
@@ -408,23 +378,10 @@ jobs:
           bash scripts/render-release-notes.sh release "${{ github.repository }}" > release-notes.md
           cat release-notes.md
 
-      # TEMPORARY (trial run) -- both guards are REVERTED with the branch
-      # trigger. The guard sits on THIS step, not the whole job, so that
-      # gen-pin.sh and render-release-notes.sh still run and log on a branch
-      # push: those two are exactly what axis 2 changed (the pin moved into this
-      # job) and are otherwise unexercised. `gh release` is the only publishing
-      # action in the workflow, so gating it is sufficient -- and it is gated
-      # twice, by the step `if:` and by an in-script assertion, so neither one
-      # being dropped in a rebase silently publishes from a branch.
       - name: Create/Update release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          case "${GITHUB_REF}" in
-            refs/tags/*) ;;
-            *) echo "refusing to publish from a non-tag ref: ${GITHUB_REF}" >&2; exit 1 ;;
-          esac
           # Everything in release/ is release content: download-artifact's output
           # (tarballs, shas, IreeRuntimePin.cmake) plus the metadata zip built
           # above. A bare glob means a new artifact type enters the release the
