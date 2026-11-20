@@ -37,7 +37,7 @@ jobs:
             echo "$PLATFORMS"
             echo "EOF"
           } | tee -a "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       - id: derive
         # `shell: bash` makes Actions invoke
         # `bash --noprofile --norc -eo pipefail {0}`, so the pipeline's exit
@@ -52,7 +52,7 @@ jobs:
       # Installing it here is what makes that skip safe: on the release path the
       # guard always runs. Ubuntu's system python3 is PEP-668 managed, hence
       # setup-python rather than pip-ing into it.
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.12'
       - run: python -m pip install --quiet pyyaml
@@ -77,12 +77,12 @@ jobs:
     steps:
       # This repo is checked out to `dist` to allow `iree` checkout to be adjacent
       # Will require repository paths to be prefixed with `dist/` in later steps
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           path: dist
       
       - name: Checkout IREE source
-        uses: ./dist/.github/actions/checkout-iree
+        uses: $/.github/actions/checkout-iree
         with:
           ref: "v${{ needs.setup.outputs.iree_version }}"
           submodules: "${{ needs.setup.outputs.submodules }}"
@@ -94,8 +94,10 @@ jobs:
       # the repo out to `path: dist` (to leave room for `iree/` alongside it).
       # build-push-action resolves BOTH against the workspace root -- `file` is
       # NOT relative to `context` -- and `uses:` steps ignore `working-directory`,
-      # so a bare `docker/` here is a nonexistent path. Same reason the
-      # `checkout-iree` local action above is `./dist/`-prefixed.
+      # so a bare `docker/` here is a nonexistent path. (The same-repo actions
+      # are `$/`-referenced instead: that resolves from this repo at the
+      # workflow's commit, not the workspace, so it needs no prefix -- and it
+      # is the form actions.lock can follow into.)
       # test/workflow_paths.test.sh enforces this per job checkout root.
       - uses: docker/setup-buildx-action@v4.2.0
       - name: Build the pinned toolchain image
@@ -125,7 +127,7 @@ jobs:
                 --prefix /work/out --iree-src /iree
             '
 
-      - uses: ./dist/.github/actions/check-and-package
+      - uses: $/.github/actions/check-and-package
         with:
           variant: ${{ matrix.variant }}
           platform: ${{ matrix.combo.platform }}
@@ -187,14 +189,14 @@ jobs:
             '
 
         # We only attest the artifact if it can be consumed
-      - uses: actions/attest@v4
+      - uses: actions/attest@v4.2.2
         with:
           subject-path: dist/assets/*.tar.gz
 
       # if-no-files-found: error, not the default `warn`. A build that produced
       # no tarball must fail this job, not upload an empty artifact and let the
       # job go green having shipped nothing.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: assets-${{ matrix.variant }}-${{ matrix.combo.platform }}
           path: dist/assets/
@@ -224,12 +226,12 @@ jobs:
           git config --system core.longpaths true
           git config --system core.symlinks true
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           path: dist
 
       - name: Checkout IREE source
-        uses: ./dist/.github/actions/checkout-iree
+        uses: $/.github/actions/checkout-iree
         with:
           ref: "v${{ needs.setup.outputs.iree_version }}"
           submodules: "${{ needs.setup.outputs.submodules }}"
@@ -249,7 +251,7 @@ jobs:
             --prefix "$PWD\dist\out" --iree-src "$PWD\iree"
           if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
-      - uses: ./dist/.github/actions/check-and-package
+      - uses: $/.github/actions/check-and-package
         with:
           variant: ${{ matrix.variant }}
           platform: ${{ matrix.platform }}
@@ -260,14 +262,14 @@ jobs:
         # across the org
         # On Windows, we will attest based on the structural checks and have a separate
         # job for verifying full functionality
-      - uses: actions/attest@v4
+      - uses: actions/attest@v4.2.2
         with:
           subject-path: dist/assets/*.tar.gz
 
       # if-no-files-found: error, not the default `warn`. A build that produced
       # no tarball must fail this job, not upload an empty artifact and let the
       # job go green having shipped nothing.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: assets-${{ matrix.variant }}-${{ matrix.platform }}
           path: dist/assets/
@@ -293,8 +295,8 @@ jobs:
         # Single entry now but leaves open additional entries later
         platform: [windows-x86_64]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: assets-${{ matrix.variant }}-${{ matrix.platform }}
           path: assets
@@ -340,7 +342,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       # `pattern:` is load-bearing, not tidiness. An unfiltered download pulls
       # EVERY artifact the run produced, and the build jobs do not control that
       # namespace: docker/build-push-action uploads a build record of its own
@@ -350,9 +352,9 @@ jobs:
       # deleted afterwards. The glob stays bare on purpose (a new RELEASE
       # artifact needs no pattern edit); the filter belongs here, at the point
       # where foreign artifacts enter, and the upload names it pairs with are
-      # `assets-<variant>-<platform>` from check-and-package.
+      # `assets-<variant>-<platform>` from the build and build-windows jobs.
       # test/workflow_paths.test.sh enforces that a publishing job filters.
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.2
         with:
           pattern: assets-*
           path: release
@@ -395,7 +397,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Everything in release/ is release content: download-artifact's output
-          # (tarballs, shas, IreeRuntimePin.cmake) plus the metadata zip built
+          # (tarballs, shas) plus IreeRuntimePin.cmake and the metadata zip built
           # above. A bare glob means a new artifact type enters the release the
           # moment it lands on disk -- no pattern list to update (executorch shape).
           gh release create "${GITHUB_REF_NAME}" release/* \

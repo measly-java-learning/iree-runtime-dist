@@ -1,0 +1,8 @@
+# actionlint <= 1.7.12 does not know the same-repo `uses: $/...` form, which
+# gh actions-lock requires for local actions that use remote actions (a
+# workspace-relative `./` action cannot be locked). Ignore only that one
+# message, only where `$/` is used; drop this once actionlint understands `$/`.
+paths:
+  .github/workflows/release.yml:
+    ignore:
+      - 'specifying action "\$/[^"]+" in invalid format because ref is missing'
