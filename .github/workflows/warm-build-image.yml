@@ -52,7 +52,7 @@ jobs:
       matrix:
         combo: ${{ fromJson(needs.setup.outputs.platforms) }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       # Root checkout (no dist/), so tag/Dockerfile are unprefixed -- identical
       # resolution to release.yml's verify job.
       - uses: docker/setup-buildx-action@v4.2.0

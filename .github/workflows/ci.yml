@@ -1,0 +1,25 @@
+name: ci
+
+# The repo's only pull_request workflow. release.yml runs on tags and
+# warm-build-image.yml on main pushes, so without this nothing checks a PR.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    # Fails when actions.lock is out of sync with the workflows, or when a
+    # locked commit no longer verifies upstream. Run `gh actions-lock` to fix.
+    # The extension is pinned so the check itself cannot float; bumping --pin
+    # is manual (Dependabot/Renovate update actions.lock, not this line).
+    runs-on: ubuntu-slim
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: gh extension install github/gh-actions-lock --pin v0.4.1
+      - run: gh actions-lock --verify

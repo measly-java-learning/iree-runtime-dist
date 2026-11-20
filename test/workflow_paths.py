@@ -5,6 +5,9 @@
    workspace root free for an adjacent ``iree/``) must prefix every path that
    Actions resolves against the WORKSPACE ROOT rather than the step's cwd:
    local ``uses: ./...`` action refs, and build-push-action's ``context``/``file``.
+   Same-repo actions are referenced as ``uses: $/...`` (repo-root-relative, at
+   the workflow's own commit) so actions.lock can cover what they use; those
+   take no prefix, and only their existence is checked.
    ``uses:`` steps ignore ``working-directory``, and build-push-action's ``file``
    is NOT relative to its ``context``. Both mistakes fail only once a runner
    picks the job up, minutes into a release, with an opaque message ("Can't find
@@ -135,13 +138,28 @@ def check_path_prefixes(repo, name, doc):
     for job_id, job in (doc.get("jobs") or {}).items():
         steps = job.get("steps") or []
         root = checkout_root(steps)
+        label = f"{name}:{job_id}"
+
+        # `$/` actions resolve from this repo at the workflow's own commit, NOT
+        # from the workspace, so they take no checkout-root prefix -- which is
+        # why they are the form the lockfile can follow (gh actions-lock refuses
+        # to lock a workspace-relative `./` action that uses remote actions).
+        # Only existence needs proving, and it holds with or without a checkout.
+        for step in steps:
+            uses = step.get("uses", "")
+            if uses.startswith("$/"):
+                rel = uses[2:]
+                if not any((repo / rel / f).is_file() for f in ("action.yml", "action.yaml")):
+                    bad(f"{label}: same-repo action '{uses}' has no action.yml at {rel}/")
+                else:
+                    ok(f"{label}: same-repo action '{uses}' resolves")
+
         if not root:
             continue
 
         for step in steps:
             uses = step.get("uses", "")
             with_ = step.get("with") or {}
-            label = f"{name}:{job_id}"
 
             if uses.startswith("./"):
                 if not uses.startswith(f"./{root}/"):
