@@ -99,9 +99,9 @@ jobs:
       # workflow's commit, not the workspace, so it needs no prefix -- and it
       # is the form actions.lock can follow into.)
       # test/workflow_paths.test.sh enforces this per job checkout root.
-      - uses: docker/setup-buildx-action@v4.2.0
+      - uses: docker/setup-buildx-action@v4.4.1
       - name: Build the pinned toolchain image
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: dist/docker
           file: "dist/docker/${{ matrix.combo.platform }}.Dockerfile"
