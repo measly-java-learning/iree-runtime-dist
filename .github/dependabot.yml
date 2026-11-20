@@ -1,0 +1,20 @@
+version: 2
+updates:
+
+  # Check for updates to GitHub Actions. Dependabot regenerates
+  # .github/workflows/actions.lock along with each bump.
+  #
+  # `directories`, not `directory: "/"`: the latter scans only
+  # .github/workflows/, missing the same-repo composite actions under
+  # .github/actions/ (checkout-iree uses actions/checkout itself), which would
+  # leave them behind the workflows on every bump.
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/*"
+    schedule:
+      interval: "monthly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
