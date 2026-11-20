@@ -55,9 +55,9 @@ jobs:
       - uses: actions/checkout@v7.0.1
       # Root checkout (no dist/), so tag/Dockerfile are unprefixed -- identical
       # resolution to release.yml's verify job.
-      - uses: docker/setup-buildx-action@v4.2.0
+      - uses: docker/setup-buildx-action@v4.4.1
       - name: Warm the pinned toolchain image cache
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@v7.4.0
         # No `load:` -- this job only populates the cache; it never runs the
         # image. cache-to writes the layers the release runs read via cache-from.
         with:
