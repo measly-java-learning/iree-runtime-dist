@@ -159,11 +159,15 @@ jobs:
         # TSan mapping error, not a silent pass. Do NOT read mmap_rnd_bits_max:
         # it is absent on some hosted runners and reading it under set -e killed
         # this step. Reads tolerate a missing knob so diagnostics never abort.
+        # Reads go through sudo: on ubuntu-26.04 the knob is root-only (mode
+        # 0600), and an unprivileged `cat` logged "<absent>" for a knob that was
+        # present and being written -- diagnostics that hid exactly the value
+        # this step exists to change.
         if: matrix.variant == 'tsan'
         run: |
-          before=$(cat /proc/sys/vm/mmap_rnd_bits 2>/dev/null || echo "<absent>")
+          before=$(sudo sysctl -n vm.mmap_rnd_bits 2>/dev/null || echo "<unreadable>")
           sudo sysctl -w vm.mmap_rnd_bits=28 2>/dev/null || true
-          after=$(cat /proc/sys/vm/mmap_rnd_bits 2>/dev/null || echo "<absent>")
+          after=$(sudo sysctl -n vm.mmap_rnd_bits 2>/dev/null || echo "<unreadable>")
           echo "vm.mmap_rnd_bits: before=$before after=$after (target 28; lower is safe for TSan)"
 
       - name: Build in container
