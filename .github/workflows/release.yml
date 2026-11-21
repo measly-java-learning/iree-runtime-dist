@@ -137,6 +137,35 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Lower ASLR entropy for in-container TSan (host-level, not namespaced)
+        # TSan's shadow mapping needs mmap_rnd_bits low enough; the x86_64 default
+        # (32) is too high for it.
+        #
+        # This runs BEFORE the build, not just before the consumer e2e: the tsan
+        # build itself executes TSan-instrumented host tools (flatcc's code
+        # generator, iree-c-embed-data -- they get the variant's CMAKE_C_FLAGS
+        # like everything else), and on a high-entropy runner the build dies on
+        # its first generated header with "unable to disable ASLR". The
+        # v3.11.0-10/-11 tsan builds passed on the ubuntu-latest of their day; the
+        # first run on ubuntu-26.04 (image 20261116) failed this way. The setting
+        # is host-level and persists for the job, so the consumer e2e below still
+        # gets it.
+        #
+        # Best-effort lower to 28: `sysctl -w` itself
+        # refuses to exceed the kernel's ceiling (that IS the clamp), so tolerate
+        # a failed write -- every case where the write is refused (value already
+        # <= 28, knob absent, ceiling below 28) is one where TSan is already fine,
+        # and a genuinely-needed-but-unset value surfaces later as an explicit
+        # TSan mapping error, not a silent pass. Do NOT read mmap_rnd_bits_max:
+        # it is absent on some hosted runners and reading it under set -e killed
+        # this step. Reads tolerate a missing knob so diagnostics never abort.
+        if: matrix.variant == 'tsan'
+        run: |
+          before=$(cat /proc/sys/vm/mmap_rnd_bits 2>/dev/null || echo "<absent>")
+          sudo sysctl -w vm.mmap_rnd_bits=28 2>/dev/null || true
+          after=$(cat /proc/sys/vm/mmap_rnd_bits 2>/dev/null || echo "<absent>")
+          echo "vm.mmap_rnd_bits: before=$before after=$after (target 28; lower is safe for TSan)"
+
       - name: Build in container
         # UID/GID needs to be set here unlike w/ ExecuTorch dist because this runs
         # one step in a locally built container vs. the other which uses the widely available `manylinux`
@@ -169,22 +198,6 @@ jobs:
           mkdir -p extracted
           tar -xzf assets/*.tar.gz -C extracted
 
-      - name: Lower ASLR entropy for in-container TSan (host-level, not namespaced)
-        # TSan's shadow mapping needs mmap_rnd_bits low enough; the x86_64 default
-        # (32) is too high for it. Best-effort lower to 28: `sysctl -w` itself
-        # refuses to exceed the kernel's ceiling (that IS the clamp), so tolerate
-        # a failed write -- every case where the write is refused (value already
-        # <= 28, knob absent, ceiling below 28) is one where TSan is already fine,
-        # and a genuinely-needed-but-unset value surfaces later as an explicit
-        # TSan mapping error, not a silent pass. Do NOT read mmap_rnd_bits_max:
-        # it is absent on some hosted runners and reading it under set -e killed
-        # this step. Reads tolerate a missing knob so diagnostics never abort.
-        if: matrix.variant == 'tsan'
-        run: |
-          before=$(cat /proc/sys/vm/mmap_rnd_bits 2>/dev/null || echo "<absent>")
-          sudo sysctl -w vm.mmap_rnd_bits=28 2>/dev/null || true
-          after=$(cat /proc/sys/vm/mmap_rnd_bits 2>/dev/null || echo "<absent>")
-          echo "vm.mmap_rnd_bits: before=$before after=$after (target 28; lower is safe for TSan)"
 
         # The one thing we do need to validate here is that the volume mounts don't
         # grant access to the IREE source
