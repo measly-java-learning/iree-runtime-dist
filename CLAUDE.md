@@ -274,6 +274,13 @@ platform), and that `cmake/windows-x86_64.cmake` restates `-GR -EHsc` in the C++
 the C flags. The second is a deletion guard, not a value check — the only other thing that catches
 a dropped `-EHsc` is a 40-minute Windows build failing 322 objects in.
 
+`release.yml` also runs as a **dry run** — `gh workflow run release.yml --ref <branch> -f
+iree_version=X.Y.Z` — which runs every build and verify job on every platform's real runner and
+publishes nothing (no attestation, no release; `test/workflow_paths.py` fails if a publishing step
+loses its `github.event_name == 'push'` gate). Releases are immutable and CI otherwise runs only on
+a tag, so any recipe change touching a platform you cannot build locally (an IREE bump, a
+toolchain move) gets a green dry run on its branch before a tag is pushed.
+
 ## Conventions
 
 - `set -euo pipefail` in every script. `grep` exits 1 on no-match and aborts under `set -e`; guard

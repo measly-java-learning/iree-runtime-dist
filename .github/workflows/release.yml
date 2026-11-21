@@ -2,6 +2,22 @@ name: release
 on:
   push:
     tags: ['v*-*']          # v<iree-version>-<pkgrev>, e.g. v3.11.0-1
+  # Dry run: every build and verify job on every platform, from the dispatched
+  # branch, with NOTHING published -- no attestation, no release. CI otherwise
+  # runs only on a tag, and this repo has immutable releases, so without this a
+  # recipe change (an IREE bump, a toolchain move) is first built for real by
+  # the release that publishes it -- and a broken platform leg would ship as a
+  # permanent partial release. The dry run is how a branch gets the real
+  # linux-aarch64 / windows-x86_64 runners before a tag is pushed.
+  #   gh workflow run release.yml --ref <branch> -f iree_version=3.14.0
+  # Every publishing step is gated on `github.event_name == 'push'`;
+  # test/workflow_paths.py fails if one is not.
+  workflow_dispatch:
+    inputs:
+      iree_version:
+        description: IREE stable release to build, without the v (e.g. 3.14.0)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -43,8 +59,19 @@ jobs:
         # `bash --noprofile --norc -eo pipefail {0}`, so the pipeline's exit
         # status is the failure of any stage, not just the last.
         shell: bash
+        # A dry run has no release tag to derive from, so it synthesizes one
+        # from the input with a `-0` pkgrev. Routing it through derive-version.sh
+        # rather than using the input directly keeps ONE validator for the
+        # version format on both paths.
+        env:
+          DRY_RUN_IREE_VERSION: ${{ inputs.iree_version }}
         run: |
-          bash scripts/derive-version.sh "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ]; then
+            tag="v${DRY_RUN_IREE_VERSION}-0"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          bash scripts/derive-version.sh "$tag" | tr '[:upper:]' '[:lower:]' >> "$GITHUB_OUTPUT"
           . scripts/lib/submodules.sh
           echo "submodules=$(required_submodules)" >> "$GITHUB_OUTPUT"
       # test/workflow_paths.test.sh SKIPS when PyYAML is missing, so that a
@@ -188,8 +215,11 @@ jobs:
               bash /tmp/t/consumer/run.sh /tmp/p
             '
 
-        # We only attest the artifact if it can be consumed
+        # We only attest the artifact if it can be consumed -- and only on a real
+        # release: an attestation is a public, permanent transparency-log entry,
+        # and a dry run's tarball is never published.
       - uses: actions/attest@v4.2.2
+        if: github.event_name == 'push'
         with:
           subject-path: dist/assets/*.tar.gz
 
@@ -261,8 +291,9 @@ jobs:
         # ExecuTorch uses dist/dist-variant-platform`, should be using same scheme
         # across the org
         # On Windows, we will attest based on the structural checks and have a separate
-        # job for verifying full functionality
+        # job for verifying full functionality. Real releases only (see above).
       - uses: actions/attest@v4.2.2
+        if: github.event_name == 'push'
         with:
           subject-path: dist/assets/*.tar.gz
 
@@ -338,6 +369,8 @@ jobs:
     # until each artifact exists and the one that needs an out-of-job consumer
     # check has passed it.
     needs: [setup, build, build-windows, verify-windows]
+    # Never on a dry run (workflow_dispatch): that is the whole contract.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
