@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Hermetic guard on the two workflow invariants that only fail on a real runner.
+"""Hermetic guard on workflow invariants that otherwise fail only on a real runner
+(or, worse, only in what a release publishes).
 
 1. PATH PREFIX. Jobs that check this repo out to ``path: dist`` (to leave the
    workspace root free for an adjacent ``iree/``) must prefix every path that
@@ -17,6 +18,13 @@
    ``matrix.<obj>.<key>``; an unresolved key expands to the EMPTY STRING rather
    than erroring, so a typo in ``runs-on:`` yields a job that cannot be scheduled
    and never names the typo.
+
+3. FILTERED DOWNLOAD. A job that runs ``gh release`` must not download artifacts
+   unfiltered (foreign ``.dockerbuild`` records reached v3.11.0-11 that way).
+
+4. DRY RUN CANNOT PUBLISH. In a workflow with a ``workflow_dispatch`` dry run,
+   every ``gh release`` job and every ``actions/attest`` step is gated on
+   ``github.event_name == 'push'``.
 
 This replaces the earlier workflow_paths.test.sh, which drove its loop from
 naming.sh's platform list. Neither check needs a platform list: the prefix rule
@@ -133,6 +141,55 @@ def check_publishing_jobs_filter(name, doc):
                 ok(f"{label}: publishing job filters its artifact download")
 
 
+def _triggers(doc):
+    # PyYAML (YAML 1.1) parses the bare key `on` as boolean True.
+    on = doc.get("on", doc.get(True)) or {}
+    if isinstance(on, str):
+        return {on}
+    return set(on)
+
+
+def _gated_on_push(cond):
+    return "github.event_name == 'push'" in str(cond or "")
+
+
+def check_dry_run_cannot_publish(name, doc):
+    """Invariant 4: in a workflow that can dry-run, nothing publishes off-push.
+
+    release.yml's workflow_dispatch trigger exists to build every platform from
+    a branch WITHOUT publishing. Its contract is only as good as the gates on
+    the steps that publish: a release job (`gh release`) and an attestation
+    (actions/attest -- a public, permanent transparency-log entry). One missing
+    `if: github.event_name == 'push'` and a dry run publishes, into a repo with
+    immutable releases. So the gate is asserted, not assumed.
+    """
+    if "workflow_dispatch" not in _triggers(doc):
+        return
+    for job_id, job in (doc.get("jobs") or {}).items():
+        label = f"{name}:{job_id}"
+        job_gated = _gated_on_push(job.get("if"))
+        steps = job.get("steps") or []
+        if any("gh release" in str(st.get("run", "")) for st in steps):
+            if job_gated:
+                ok(f"{label}: publishing job is gated on push")
+            else:
+                bad(
+                    f"{label}: publishing job is not gated on push",
+                    "a workflow_dispatch dry run would publish a release; add "
+                    "`if: github.event_name == 'push'` to the job",
+                )
+        for st in steps:
+            if str(st.get("uses", "")).startswith("actions/attest@"):
+                if job_gated or _gated_on_push(st.get("if")):
+                    ok(f"{label}: attest step is gated on push")
+                else:
+                    bad(
+                        f"{label}: attest step is not gated on push",
+                        "a workflow_dispatch dry run would write a public "
+                        "attestation for an unpublished artifact",
+                    )
+
+
 def check_path_prefixes(repo, name, doc):
     """Invariant 1: workspace-root-resolved paths carry the job's checkout root."""
     for job_id, job in (doc.get("jobs") or {}).items():
@@ -197,6 +254,7 @@ def main():
         check_matrix_keys(wf.name, doc, text)
         check_path_prefixes(repo, wf.name, doc)
         check_publishing_jobs_filter(wf.name, doc)
+        check_dry_run_cannot_publish(wf.name, doc)
 
     if FAILS:
         print(f"\n{FAILS} assertion(s) FAILED", file=sys.stderr)
