@@ -11,9 +11,9 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # backtrace_* symbols across all 191 archives, and absent from iree_base_base's
 # INTERFACE_LINK_LIBRARIES where Linux carries it. Shipping the Linux list on a
 # Windows artifact would claim a license for code that is not there.
-assert_eq "$(linked_components linux-x86_64)"   "flatcc printf libbacktrace" "linux linked components"
-assert_eq "$(linked_components linux-aarch64)"  "flatcc printf libbacktrace" "linux-aarch64 linked components"
-assert_eq "$(linked_components windows-x86_64)" "flatcc printf"              "windows drops libbacktrace"
+assert_eq "$(linked_components linux-x86_64)"   "flatcc libbacktrace" "linux linked components"
+assert_eq "$(linked_components linux-aarch64)"  "flatcc libbacktrace" "linux-aarch64 linked components"
+assert_eq "$(linked_components windows-x86_64)" "flatcc"              "windows drops libbacktrace"
 
 linked_components bogus-platform >/dev/null 2>&1
 assert_eq "$?" "2" "linked_components rejects an unknown platform"
@@ -41,8 +41,8 @@ else echo "FAIL: LICENSE missing or empty" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1))
 if [ -d "$prefix/THIRD-PARTY-NOTICES" ]; then echo "ok: THIRD-PARTY-NOTICES present"
 else echo "FAIL: THIRD-PARTY-NOTICES missing" >&2; ASSERT_FAILS=$((ASSERT_FAILS+1)); fi
 
-# Determined empirically (Task 8): flatcc, printf, and libbacktrace are the
-# components with a real link-graph footprint reaching iree_runtime_unified --
+# Determined empirically (Task 8, re-checked for 3.14): flatcc and libbacktrace
+# are the components with a real link-graph footprint reaching iree_runtime_unified --
 # on LINUX. Windows links no libbacktrace at all (W4: no install rule, no
 # archive, zero backtrace_* symbols across the shipped archives), so the
 # expected set is per-platform. Read the platform from the prefix's own
@@ -66,7 +66,10 @@ done
 
 # The other direction: a component this platform does NOT link must not have a
 # notice shipped for it. Over-claiming a license is the same class of error as
-# claiming LLVM -- and on Windows libbacktrace is exactly that case.
+# claiming LLVM -- and on Windows libbacktrace is exactly that case. printf stays
+# in this list after leaving the linked set in 3.14 (IREE replaced the vendored
+# eyalroz/printf with its own iree/base/printf.c): a stale notice for it is
+# exactly the over-claim this loop exists to catch.
 for maybe in flatcc printf libbacktrace; do
   case " $expected_linked " in
     *" $maybe "*) continue ;;

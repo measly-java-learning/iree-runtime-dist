@@ -86,8 +86,12 @@ git -C "$fx/iree-src" init -q
 git -C "$fx/iree-src" -c user.email=test@example.com -c user.name=test \
 	commit -q --allow-empty -m "fixture commit"
 # gen-manifest.sh OBSERVES iree_tag via git describe, so the fixture repo needs
-# a tag for the observation to succeed.
+# a tag for the observation to succeed. The rc tag on the SAME commit is the
+# shape IREE actually ships (v3.14.0 shares its commit with iree-3.14.0rc*), and
+# a bare `describe --tags` returns it -- verified -- so the iree_tag assertion
+# below fails unless gen-manifest.sh keeps its --match 'v[0-9]*'.
 git -C "$fx/iree-src" tag v3.11.0
+git -C "$fx/iree-src" tag iree-3.11.0rc20260101
 
 # The linux fixture embeds the source root in the fake CMAKE_C_FLAGS, and the
 # token assertions below exist to prove emit-manifest.py rewrote that root.
@@ -111,8 +115,8 @@ fake_cache "$fx/windows-build" windows-x86_64 "$fx/iree-src" 'C:\work\iree'
 
 # Fake installed VM bytecode header, one copy per fixture prefix.
 for p in linux-prefix windows-prefix; do
-	mkdir -p "$fx/$p/include/iree/vm/bytecode/utils"
-	cat >"$fx/$p/include/iree/vm/bytecode/utils/isa.h" <<'EOF'
+	mkdir -p "$fx/$p/include/iree/vm/bytecode/isa"
+	cat >"$fx/$p/include/iree/vm/bytecode/isa/isa.h" <<'EOF'
 #define IREE_VM_BYTECODE_VERSION_MAJOR 17
 #define IREE_VM_BYTECODE_VERSION_MINOR 0
 EOF
@@ -176,8 +180,8 @@ echo "Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35228.1 for x64" >&2
 exit 2
 EOF
 chmod +x "$fx4/fakebin4/cl"
-mkdir -p "$fx4/windows-prefix4/include/iree/vm/bytecode/utils"
-cat >"$fx4/windows-prefix4/include/iree/vm/bytecode/utils/isa.h" <<'EOF'
+mkdir -p "$fx4/windows-prefix4/include/iree/vm/bytecode/isa"
+cat >"$fx4/windows-prefix4/include/iree/vm/bytecode/isa/isa.h" <<'EOF'
 #define IREE_VM_BYTECODE_VERSION_MAJOR 17
 #define IREE_VM_BYTECODE_VERSION_MINOR 0
 EOF
@@ -335,9 +339,22 @@ else
 fi
 
 assert_eq "$(get "$m" "['schema_version']")" "2" "schema_version"
-assert_eq "$(get "$m" "['iree_version']")" "3.11.0" "iree_version"
-assert_eq "$(get "$m" "['iree_tag']")" "v3.11.0" "iree_tag"
-assert_eq "$(get "$m" "['iree_compile_version']")" "3.11.0" "paired compiler version"
+# Invariants, not a pinned version: a literal here fails CI on every IREE bump
+# (it did, for 3.14) while proving nothing a relation can't. The three facts are
+# observed separately -- iree_version and iree_tag from the IREE checkout,
+# iree_compile_version from the wheel that compiled add.vmfb -- so relating them
+# still catches what matters: an rc tag stamped as the version, a tag that is
+# not v+version, and a runtime paired with a different stable compiler
+# (derive-version.sh's stable-release premise: wheel version == IREE version).
+iree_version="$(get "$m" "['iree_version']")"
+if printf '%s' "$iree_version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+	echo "ok: iree_version is a stable MAJOR.MINOR.PATCH ($iree_version)"
+else
+	echo "FAIL: iree_version is not a stable MAJOR.MINOR.PATCH: [$iree_version]" >&2
+	ASSERT_FAILS=$((ASSERT_FAILS + 1))
+fi
+assert_eq "$(get "$m" "['iree_tag']")" "v$iree_version" "iree_tag is v + iree_version"
+assert_eq "$(get "$m" "['iree_compile_version']")" "$iree_version" "paired compiler version equals iree_version"
 
 # vm_bytecode_version (design lines 119, 214): the HAL/VM module ABI version
 # the shipped runtime expects, read from its own installed header -- must

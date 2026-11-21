@@ -7,7 +7,8 @@
 # (3.12.0.dev) with a stable 3.11.0 compiler.
 #
 # Flag spelling was determined empirically for iree-base-compiler==3.11.0 by
-# installing it and inspecting `iree-compile --help`:
+# installing it and inspecting `iree-compile --help` (unchanged in 3.14.0, which
+# compiled add.vmfb with it on linux-x86_64 and windows-x86_64):
 #   --iree-hal-target-device=local
 #   --iree-hal-local-target-device-backends=llvm-cpu
 # (the "modern" form). This is the form that actually compiled emit/add.mlir

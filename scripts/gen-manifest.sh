@@ -32,8 +32,9 @@ mkdir -p "$OUT_DIR"
 RUNTIME_COMMIT="$(git -C "$IREE_SRC" rev-parse HEAD)"
 
 # iree_tag is OBSERVED beside runtime_commit rather than reconstructed as
-# "v" + iree_version. Same checkout, same git, one path to the fact.
-IREE_TAG="$(git -C "$IREE_SRC" describe --tags --abbrev=0)" ||
+# "v" + iree_version. Same checkout, same git, one path to the fact. The
+# --match mirrors build-runtime.sh: IREE puts rc tags on the release commit.
+IREE_TAG="$(git -C "$IREE_SRC" describe --tags --abbrev=0 --match 'v[0-9]*')" ||
 	{
 		echo "error: could not read a tag from '$IREE_SRC'" >&2
 		exit 1
@@ -117,7 +118,7 @@ CLANG_VERSION="$(clang --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]
 # fabricated -- iree/vm/bytecode/verifier.c rejects a module whose bytecode
 # version doesn't match IREE_VM_BYTECODE_VERSION_{MAJOR,MINOR} from this same
 # header, so this is the actual value the shipped runtime enforces.
-_isa_header="$PREFIX/include/iree/vm/bytecode/utils/isa.h"
+_isa_header="$PREFIX/include/iree/vm/bytecode/isa/isa.h"
 VM_BYTECODE_VERSION_MAJOR="$(grep -oE '#define[[:space:]]+IREE_VM_BYTECODE_VERSION_MAJOR[[:space:]]+[0-9]+' "$_isa_header" 2>/dev/null | grep -oE '[0-9]+$' || true)"
 VM_BYTECODE_VERSION_MINOR="$(grep -oE '#define[[:space:]]+IREE_VM_BYTECODE_VERSION_MINOR[[:space:]]+[0-9]+' "$_isa_header" 2>/dev/null | grep -oE '[0-9]+$' || true)"
 if [ -z "$VM_BYTECODE_VERSION_MAJOR" ] || [ -z "$VM_BYTECODE_VERSION_MINOR" ]; then

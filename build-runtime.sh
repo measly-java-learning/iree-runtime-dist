@@ -40,10 +40,7 @@ require_value() { # <flag>
 
 # Two places below repair upstream packaging gaps that exist only in the
 # clang/Linux build: the libbacktrace_impl target build and the libbacktrace
-# install repair. (The printf install repair is NOT Linux-only -- the Runtime
-# export set carries printf_printf on Windows too -- so it is deliberately not
-# inside these guards; see its comment at the install site.) Both libbacktrace
-# guards were guarded on naming.sh's platform_toolchain(), which commit 4bb545b
+# install repair. Both libbacktrace guards were guarded on naming.sh's platform_toolchain(), which commit 4bb545b
 # deleted along with the rest of the CI-topology helpers -- so both guards were
 # left calling a function that no longer exists. One predicate, local to this
 # script, rather than two open-coded platform comparisons: these guards must
@@ -139,7 +136,12 @@ export GIT_CONFIG_VALUE_0="$_iree_src_abs"
 # recorded provenance. gen-manifest.sh already hard-requires this same repo be
 # readable (`git rev-parse HEAD`, no fallback), so tolerating failure here was
 # never coherent -- it just moved the error somewhere less obvious.
-IREE_VERSION="$(git -C "$IREE_SRC" describe --tags --abbrev=0 | sed 's/^v//')" || {
+# --match 'v[0-9]*': IREE tags release candidates on the release commit itself
+# (v3.14.0 shares its commit with three iree-3.14.0rc* tags), and in a full
+# clone a bare `describe --tags` can return the rc tag -- which would then be
+# stamped into manifest.json, BUILDINFO and the package version. CI's checkout
+# fetches only the one tag and never saw this; local builds did.
+IREE_VERSION="$(git -C "$IREE_SRC" describe --tags --abbrev=0 --match 'v[0-9]*' | sed 's/^v//')" || {
   echo "error: could not read a tag from '$IREE_SRC' -- is it a git checkout at a tagged commit?" >&2
   exit 1
 }
@@ -301,20 +303,6 @@ for _component in IREEDevLibraries-Runtime IREEBundledLibraries IREECMakeExports
   cmake --install "$BUILD_DIR" --component "$_component" --prefix "$PREFIX"
 done
 
-# IREE's top-level CMakeLists.txt does `add_subdirectory(build_tools/third_party/printf
-# EXCLUDE_FROM_ALL)`. CMake's documented behavior for an EXCLUDE_FROM_ALL subdirectory is
-# that its cmake_install.cmake is never chained into the parent directory's install script
-# -- so the component-scoped installs above never reach it, even though the export set's
-# IREETargets-Runtime-release.cmake references the archive via IMPORTED_LOCATION
-# (libprintf_printf.a on Linux, printf_printf.lib on MSVC). This install must run on EVERY
-# platform, deliberately NOT inside the platform_is_msvc guard below: the Runtime export
-# set carries printf_printf on Windows too, and that guard swallowing this install shipped
-# a Windows prefix that fails find_package(IREE) with "imported target printf_printf
-# references ... printf_printf.lib but this file does not exist".
-# Install that one subdirectory's IREEBundledLibraries component explicitly, or the printf
-# archive silently never lands in $PREFIX/lib despite the export set claiming it exists.
-cmake --install "$BUILD_DIR/build_tools/third_party/printf" --component IREEBundledLibraries --prefix "$PREFIX"
-
 # libbacktrace is a Linux-only repair. On Windows IREE emits no install rule for
 # it, ships no libbacktrace*.lib, references zero backtrace_* symbols across all
 # 191 archives, and omits it from iree_base_base's INTERFACE_LINK_LIBRARIES. It
@@ -324,8 +312,8 @@ cmake --install "$BUILD_DIR/build_tools/third_party/printf" --component IREEBund
 # ever went missing, turning a loud failure into a quiet one.
 if ! platform_is_msvc "$PLATFORM"; then
 
-# build_tools/third_party/libbacktrace has the same EXCLUDE_FROM_ALL shape as printf
-# above, but worse: its CMakeLists.txt has NO install(TARGETS ...) rule at all for the
+# build_tools/third_party/libbacktrace is an EXCLUDE_FROM_ALL subdirectory, so its
+# cmake_install.cmake is never chained into the parent's -- and worse, its CMakeLists.txt has NO install(TARGETS ...) rule at all for the
 # libbacktrace_impl archive, in any component -- so no `cmake --install --component`
 # invocation can ever produce it; `cmake_install.cmake` for that subdirectory contains
 # only boilerplate. Discovered while proving the header fix compiles+links+runs
@@ -335,15 +323,14 @@ if ! platform_is_msvc "$PLATFORM"; then
 # meant to be exported. CMake's install(EXPORT) machinery does not honor that intent: it
 # writes the bare name "libbacktrace_libbacktrace" straight into iree_base_base's
 # INTERFACE_LINK_LIBRARIES in IREETargets-Runtime.cmake, with no corresponding
-# add_library(...IMPORTED) anywhere in the export set (unlike e.g. printf_printf, which
+# add_library(...IMPORTED) anywhere in the export set (unlike e.g. flatcc_parsing, which
 # IS a real imported target with an IMPORTED_LOCATION -- compare the two in
 # IREETargets-Runtime.cmake). A downstream consumer's CMake can't resolve the bare name as
 # a target, so it falls back to treating it as a raw library name -- the linker sees
 # "-llibbacktrace_libbacktrace" with no matching -L search path, and fails. Fix this the
 # same way CMake's own generator would have, had upstream exported the target: copy the
 # real archive in, then define the missing imported target by hand, pointing
-# IMPORTED_LOCATION at it. This is a distinct defect from the printf install gap and from
-# the missing public headers (scripts/install-headers.sh); flagged for a proper
+# IMPORTED_LOCATION at it. This is a distinct defect from the missing public headers (scripts/install-headers.sh); flagged for a proper
 # upstream/export-set fix rather than papered over silently -- fail loudly if the build
 # tree doesn't have the archive this depends on, since a silent no-op here is exactly how
 # the header gap shipped.
@@ -530,7 +517,7 @@ sed -e "s|@IREE_VERSION@|${IREE_VERSION}|g" \
     "$HERE/cmake/IreeRuntimeDist.cmake.in" \
     > "$PREFIX/lib/cmake/IreeRuntimeDist/IreeRuntimeDistConfig.cmake"
 
-# Upstream has no write_basic_package_version_file, so find_package(IREERuntime 3.11)
+# Upstream has no write_basic_package_version_file, so find_package(IREERuntime 3.14)
 # with a version argument fails today. Supply the file it omits.
 cat > "$PREFIX/lib/cmake/IREE/IREERuntimeConfigVersion.cmake" <<EOF
 set(PACKAGE_VERSION "${IREE_VERSION}")

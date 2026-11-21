@@ -25,10 +25,13 @@
 #                 reachable from the runtime target and contributes no referenced
 #                 symbols -- only flatcc_parsing (the verifier) is actually used at
 #                 runtime. One license covers both halves of the same submodule.
-#   printf      - printf_printf is directly in iree_base_base's
-#                 INTERFACE_LINK_LIBRARIES (link-reachable), and its symbols
-#                 (vfctprintf, vsnprintf_) are referenced as undefined symbols from
-#                 libiree_base_base.a and present in the merged libiree_runtime_unified.a.
+#   printf      - GONE as of IREE 3.14, which replaced the vendored eyalroz/printf
+#                 with its own Apache-2.0 iree/base/printf.c. Re-checked against a
+#                 3.14 build: printf_printf is absent from the export set (the only
+#                 third-party change vs 3.11), the old vfctprintf/vsnprintf_
+#                 symbols appear in zero archives, and iree_vfctprintf is defined
+#                 in libiree_base_base.a / libiree_runtime_unified.a -- IREE's own
+#                 code, covered by the top-level LICENSE.
 #   libbacktrace - libbacktrace_libbacktrace is directly in iree_base_base's
 #                 INTERFACE_LINK_LIBRARIES (link-reachable) -- this is the target
 #                 build-runtime.sh had to hand-define because upstream never
@@ -77,8 +80,11 @@
 #   flatcc      - ACCEPT. 10 flatcc_verify_* symbols defined in flatcc_parsing.lib
 #                 and referenced undefined from iree_vm_bytecode_module.lib and
 #                 iree_runtime_unified.lib. Same as Linux.
-#   printf      - ACCEPT. vfctprintf/vsnprintf_ referenced undefined from
-#                 iree_base_base.lib and iree_runtime_unified.lib. Same as Linux.
+#   printf      - ACCEPTed for 3.11; gone in 3.14. Re-checked against a 3.14 MSVC
+#                 build with llvm-nm over all 240 .lib archives: zero
+#                 vfctprintf/vsnprintf_ symbols, no printf_printf in the export
+#                 set, iree_vfctprintf defined in iree_base_base.lib and
+#                 iree_runtime_unified.lib. Same as Linux.
 #   libbacktrace - REJECTED on Windows, confirmed four ways: CMake emits no
 #                 install rule; no libbacktrace*.lib anywhere in the prefix; zero
 #                 backtrace_create_state/_full/_pcinfo/_simple/_syminfo symbols
@@ -90,8 +96,8 @@
 #                 CaptureStackBackTrace symbol. The symbolization path is simply
 #                 not enabled in this configuration.
 #   See spike/windows-iree-runbook.md W4 for the full derivation.
-_IREE_LINKED_COMPONENTS_LINUX="flatcc printf libbacktrace"
-_IREE_LINKED_COMPONENTS_WINDOWS="flatcc printf"
+_IREE_LINKED_COMPONENTS_LINUX="flatcc libbacktrace"
+_IREE_LINKED_COMPONENTS_WINDOWS="flatcc"
 
 linked_components() { # <platform>
   case "${1:-}" in
