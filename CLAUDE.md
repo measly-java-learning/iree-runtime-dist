@@ -9,7 +9,8 @@ It produces *artifacts*, not a library — a build recipe plus packaging plus CI
 `measly-java-learning/iree-runtime-dist`. The first successful release is `v3.11.0-10`, which
 publishes `default` and `tsan` tarballs for both `linux-x86_64` and `linux-aarch64` (plus the
 metadata zip and `IreeRuntimePin.cmake`). Release URLs under that tag resolve; earlier `v3.11.0-*`
-tags did not publish assets, so don't write or imply commands against those.
+tags did not publish assets, so don't write or imply commands against those. The recipe now
+targets IREE `v3.14.0`; no `v3.14.0-*` tag has been pushed yet, so 3.14 release URLs do not resolve.
 
 Design: `docs/superpowers/specs/2026-07-19-iree-runtime-dist-design.md`.
 
@@ -28,7 +29,7 @@ bash test/consumer/run.sh out                         # consumer e2e (run in a c
   `iree-compile`. It appears only as a version string in `manifest.json` and a CI-time pip wheel
   used to compile `add.vmfb`.
 - **Never `submodules: recursive`.** IREE's `check_submodule_init.py --runtime_only` hard-requires
-  every path in `runtime_submodules.txt` — 11 paths, all listed in `scripts/lib/submodules.sh` —
+  every path in `runtime_submodules.txt` — 10 paths as of 3.14, all listed in `scripts/lib/submodules.sh` —
   regardless of which HAL drivers/loaders are enabled. `third_party/llvm-project` (2.6 GB) is not
   one of them and is never needed.
 - **Two lists, two different jobs — do not conflate them.**
@@ -45,10 +46,13 @@ bash test/consumer/run.sh out                         # consumer e2e (run in a c
   (adding the missing `find_package(Threads)` call). Anything else added lives in
   `lib/cmake/IreeRuntimeDist/`. Editing `lib/cmake/IREE/IREETargets-Runtime.cmake` beyond those
   two repairs is a test failure (`test/cmake_additions.test.sh` checks for it).
-- **v1 is stable `v3.11.0` only. Never `main`.** Mixing a main-branch runtime with a stable
-  compiler is exactly the VM import-signature mismatch this project exists to prevent. Never
-  point `--iree-src` at `/home/corey/workspace/iree` — that checkout tracks `main`, not the
-  pinned `v3.11.0` tag this recipe, `manifest.json`, and the paired `add.vmfb` all assume.
+- **One stable IREE release at a time — currently `v3.14.0`. Never `main`.** Mixing a
+  main-branch runtime with a stable compiler is exactly the VM import-signature mismatch this
+  project exists to prevent. The recipe tracks a single version, not a range: moving to 3.14
+  dropped the printf repair, so it can no longer build 3.11. Never point `--iree-src` at
+  `/home/corey/workspace/iree` — that checkout tracks `main`, not the pinned `v3.14.0` tag this
+  recipe, `manifest.json`, and the paired `add.vmfb` all assume. IREE also puts `iree-X.Y.Zrc*`
+  tags on the release commit, so tag reads use `git describe --match 'v[0-9]*'`.
 
 ## Architecture
 
@@ -58,9 +62,10 @@ metadata, pair with the compiler.
 Phase 1's `cmake --install` is load-bearing but not sufficient by itself — IREE marks every
 library install rule `EXCLUDE_FROM_ALL`, so a bare install ships zero archives and zero headers
 even though the export set still looks complete. The recipe installs three named components
-(`IREEDevLibraries-Runtime`, `IREEBundledLibraries`, `IREECMakeExports`) and then repairs four
-separate upstream packaging gaps found the hard way: the `printf` subdirectory's install never
-chains into the parent (needs an explicit second `cmake --install --component`), `libbacktrace`
+(`IREEDevLibraries-Runtime`, `IREEBundledLibraries`, `IREECMakeExports`) and then repairs three
+separate upstream packaging gaps found the hard way (a fourth — the vendored `printf`
+subdirectory's install never chaining — disappeared in 3.14, when IREE replaced that library with
+its own `iree/base/printf.c`): `libbacktrace`
 has no `install(TARGETS ...)` rule at all for its archive and its target is never exported
 (hand-copy the archive, hand-write the imported-target block), `IREERuntimeConfig.cmake` never
 `find_package(Threads)`s before including the targets file (breaks bare `find_package` at

@@ -26,7 +26,7 @@ rm -rf "$NOTICES"
 mkdir -p "$NOTICES"
 
 # Where a linked component's license actually lives is not uniform:
-#   - flatcc, printf are real git submodules under third_party/<name>/.
+#   - flatcc is a real git submodule under third_party/<name>/.
 #   - libbacktrace is NOT vendored in the source tree at all: its CMakeLists.txt
 #     (build_tools/third_party/libbacktrace/CMakeLists.txt) pulls it in with
 #     FetchContent at configure time, pinned to a specific upstream commit. Its

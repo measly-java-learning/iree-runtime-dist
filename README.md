@@ -7,11 +7,10 @@ consumers.
 Consumers (e.g. `djl-iree-engine`) do not build IREE. They `FetchContent` a pinned tarball and
 `find_package` it.
 
-**Release status.** The repo lives at `measly-java-learning/iree-runtime-dist`, and `v3.11.0-3`
-published successfully (single `default` variant, old flat-variable pin). The variant matrix and
-the `tsan` variant documented below are committed but **not yet in a published release** — the
-next tag is what first publishes `tsan` assets and the helper-based pin. Treat `tsan` release
-URLs below as "resolves after the next tag," not today.
+**Release status.** The repo lives at `measly-java-learning/iree-runtime-dist`. The latest
+published release is `v3.11.0-10` (`default` + `tsan` for `linux-x86_64` and `linux-aarch64`).
+The recipe now targets IREE **3.14.0**; until a `v3.14.0-*` tag is pushed, 3.14 release URLs
+below do not resolve yet.
 
 ## Why this isn't a thin wrapper
 
@@ -20,27 +19,26 @@ the naive plan — `cmake --install` and tar it up — looks like it should just
 
 - **A bare `cmake --install` ships zero archives and zero headers.** IREE's own
   `iree_install_support.cmake` marks every library install rule `EXCLUDE_FROM_ALL`. The export
-  set still gets generated and still looks complete (~198 `IMPORTED_LOCATION` entries), but every
+  set still gets generated and still looks complete (~250 `IMPORTED_LOCATION` entries), but every
   entry points at a file that was never installed — `find_package` succeeds and the first
   downstream *link* fails instead. `build-runtime.sh` installs three components by name
   (`IREEDevLibraries-Runtime`, `IREEBundledLibraries`, `IREECMakeExports`) to get real content.
-- Four separate upstream packaging gaps still have to be repaired even after that:
-  1. `build_tools/third_party/printf` is its own `EXCLUDE_FROM_ALL` subdirectory whose
-     `cmake_install.cmake` never chains into the parent install, so its archive needs an
-     explicit second `cmake --install --component`.
-  2. `build_tools/third_party/libbacktrace` has no `install(TARGETS ...)` rule for its archive at
+- Three separate upstream packaging gaps still have to be repaired even after that. (Through
+  3.11 there was a fourth -- the vendored `printf` subdirectory never chained its install --
+  which went away when IREE 3.14 replaced that library with its own `iree/base/printf.c`.)
+  1. `build_tools/third_party/libbacktrace` has no `install(TARGETS ...)` rule for its archive at
      all, and the target the export set references (`libbacktrace_libbacktrace`) is never
      declared as an importable target upstream. The recipe copies the archive in by hand and
      writes the missing `add_library(... IMPORTED)` + `IMPORTED_LOCATION` block itself.
-  3. `IREERuntimeConfig.cmake` never calls `find_package(Threads)` before including the targets
+  2. `IREERuntimeConfig.cmake` never calls `find_package(Threads)` before including the targets
      file, so a bare consumer `find_package(IREERuntime)` fails to even *configure* — it errors
      on `Threads::Threads` not being found. The recipe patches the config to re-find its own
      external dependency.
-  4. Several public headers (e.g. `iree/base/status.h`, `iree/hal/buffer.h`) are listed in a
+  3. Several public headers (e.g. `iree/base/status.h`, `iree/hal/buffer.h`) are listed in a
      target's `HDRS` but never get an `install(FILES ...)` rule generated for them. The recipe
      walks the real `#include` graph from the installed headers and copies what's missing
      straight from source.
-- Upstream also omits a CMake package version file, so `find_package(IREERuntime 3.11.0)` with a
+- Upstream also omits a CMake package version file, so `find_package(IREERuntime 3.14.0)` with a
   version constraint fails outright; the recipe writes one.
 - The install tree leaks absolute build-machine paths (the staging prefix, system library paths,
   a flatcc-generated `-I` flag) into the exported `.cmake` files. A repair pass rewrites them, and
@@ -51,15 +49,15 @@ export machinery emits, verified against the actual built tree rather than assum
 
 ## What this ships
 
-`iree-runtime-3.11.0-default-linux-x86_64.tar.gz` — measured 2.4 MB compressed, unpacks to one
+`iree-runtime-3.14.0-default-linux-x86_64.tar.gz` — measured 3.1 MB compressed, unpacks to one
 top-level directory:
 
 ```
-lib/                        # 198 static archives (PIC)
+lib/                        # 247 static archives (PIC)
   cmake/IREE/                # upstream IREERuntimeConfig.cmake + targets, unmodified
                               # (+ a generated IREERuntimeConfigVersion.cmake upstream omits)
   cmake/IreeRuntimeDist/      # umbrella target + manifest as CMake vars
-include/                    # 367 public headers (374 files under include/, counting .inl)
+include/                    # 429 public headers (437 files under include/, counting .inl)
 share/iree-runtime-dist/
   manifest.json              # schema_version 2: pairing + build-config attestation
   element_types.json         # IREE_HAL_ELEMENT_TYPE_* generated from IREE headers, enriched
@@ -69,7 +67,7 @@ share/iree-runtime-dist/
   add.vmfb                   # smoke module, compiled by the paired compiler
 LICENSE
 THIRD-PARTY-NOTICES/
-  flatcc/  printf/  libbacktrace/
+  flatcc/  libbacktrace/           # Windows: flatcc/ only
 BUILDINFO
 ```
 
@@ -78,8 +76,7 @@ properties — value, numerical type, signedness, bit width for element types; v
 description for status codes), not a flat name-to-int map, and ship with JSON Schemas alongside
 the data. The same four files, plus a README, are also published as their own
 `iree-runtime-metadata-<version>.zip` release asset — one stable URL for non-CMake consumers
-(Gradle, Python, Rust, …) to fetch independent of the native tarball. This asset starts shipping
-with the **next** tagged release, not `v3.11.0-3`.
+(Gradle, Python, Rust, …) to fetch independent of the native tarball.
 
 `THIRD-PARTY-NOTICES/` covers exactly the third-party code actually *linked* into the shipped
 archives (determined empirically from the CMake export set's transitive link closure and cross-
@@ -93,7 +90,7 @@ This dist builds with `-DIREE_BUILD_COMPILER=OFF`. It never builds or ships `ire
 produce loadable `.vmfb` files, install the paired compiler recorded in `manifest.json`:
 
 ```bash
-pip install iree-base-compiler==3.11.0
+pip install iree-base-compiler==3.14.0
 ```
 
 Mismatched compiler and runtime versions fail at VM context creation with a cryptic import
@@ -138,14 +135,14 @@ those are gone, not kept alongside.
 **2. Direct upstream, unmodified**, if you'd rather not take the dist's umbrella target:
 
 ```cmake
-find_package(IREERuntime 3.11.0 REQUIRED
+find_package(IREERuntime 3.14.0 REQUIRED
   PATHS "${iree_runtime_SOURCE_DIR}/lib/cmake/IREE" NO_DEFAULT_PATH)
 
 target_link_libraries(my_jni_lib PRIVATE iree_runtime_unified)
 ```
 
 The generated version file honors version constraints correctly:
-`find_package(IREERuntime 3.11.0)` succeeds; `find_package(IREERuntime 99.0.0)` fails with
+`find_package(IREERuntime 3.14.0)` succeeds; `find_package(IREERuntime 99.0.0)` fails with
 CMake's normal "no compatible configuration file" error, not a silent success.
 
 Because the pin records both URL and SHA-256, `FetchContent` re-verifies the tarball on every
@@ -168,8 +165,8 @@ Pushing a version tag is the only trigger (`.github/workflows/release.yml`, `on:
 v*.*.*-*`).
 
 ```bash
-git tag v3.11.0-1
-git push origin v3.11.0-1
+git tag v3.14.0-1
+git push origin v3.14.0-1
 ```
 
 `<pkgrev>` (the trailing `-1`) bumps re-roll the same IREE version after a recipe fix.
@@ -179,7 +176,7 @@ end-to-end outside of the unit tests and the local build described below.
 
 ## Building locally
 
-The required submodule set is **11 paths**, not one — IREE's own
+The required submodule set is **10 paths**, not one — IREE's own
 `build_tools/scripts/git/check_submodule_init.py --runtime_only` hard-requires every path listed
 in `runtime_submodules.txt` regardless of which HAL drivers/loaders you enable. The full,
 authoritative list is `scripts/lib/submodules.sh`. `third_party/llvm-project` (2.6 GB) is not in
@@ -187,14 +184,14 @@ that list and is not needed — that exclusion is most of the win. Never use
 `submodule update --init --recursive`.
 
 ```bash
-git clone --filter=blob:none --depth 1 --branch v3.11.0 \
+git clone --filter=blob:none --depth 1 --branch v3.14.0 \
   https://github.com/iree-org/iree.git /path/to/iree
 
 # Full required set — see scripts/lib/submodules.sh for the single source of truth.
 git -C /path/to/iree submodule update --init --depth 1 \
   third_party/benchmark third_party/flatcc third_party/googletest \
   third_party/hip-build-deps third_party/hsa-runtime-headers third_party/musl \
-  third_party/printf third_party/spirv_cross third_party/tracy \
+  third_party/spirv_cross third_party/tracy \
   third_party/vulkan_headers third_party/webgpu-headers
 ```
 
@@ -266,8 +263,8 @@ latter runs both `local-sync` and `local-task` end to end against the shipped `a
 ## Verifying an artifact
 
 ```bash
-sha256sum -c iree-runtime-3.11.0-default-linux-x86_64.tar.gz.sha256
-gh attestation verify iree-runtime-3.11.0-default-linux-x86_64.tar.gz \
+sha256sum -c iree-runtime-3.14.0-default-linux-x86_64.tar.gz.sha256
+gh attestation verify iree-runtime-3.14.0-default-linux-x86_64.tar.gz \
   --repo <owner>/iree-runtime-dist
 ```
 

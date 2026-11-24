@@ -191,7 +191,7 @@ manifest = {
         ),
         "vm_bytecode_version": (
             "IREE_VM_BYTECODE_VERSION_MAJOR.MINOR from the shipped runtime's "
-            "own iree/vm/bytecode/utils/isa.h -- the value the VM bytecode "
+            "own iree/vm/bytecode/isa/isa.h -- the value the VM bytecode "
             "verifier checks a loaded .vmfb against. A .vmfb compiled by a "
             "mismatched compiler version fails to load with a VM import "
             "signature mismatch; compare this field before loading one built "

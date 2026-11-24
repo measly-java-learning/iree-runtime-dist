@@ -4,7 +4,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/assert.sh"
 . "$here/../scripts/lib/submodules.sh"
 
-EXPECTED="third_party/benchmark third_party/flatcc third_party/googletest third_party/hip-build-deps third_party/hsa-runtime-headers third_party/musl third_party/printf third_party/spirv_cross third_party/tracy third_party/vulkan_headers third_party/webgpu-headers"
+EXPECTED="third_party/benchmark third_party/flatcc third_party/googletest third_party/hip-build-deps third_party/hsa-runtime-headers third_party/musl third_party/spirv_cross third_party/tracy third_party/vulkan_headers third_party/webgpu-headers"
 
 assert_eq "$IREE_REQUIRED_SUBMODULES" "$EXPECTED" "required submodule set"
 assert_eq "$(required_submodules)" "$EXPECTED" "required_submodules prints the set"
